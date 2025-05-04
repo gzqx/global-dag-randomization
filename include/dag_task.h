@@ -1,12 +1,14 @@
 #ifndef DAG_TASK_H
 #define DAG_TASK_H
 
+
 #include "sub_task.h"
 #include <vector>
 #include <map>
 #include <string>
 #include <iostream>
-#include <limits> // For numeric_limits
+#include <limits>
+#include <optional> // For returning optional map
 
 namespace DagParser {
 
@@ -19,22 +21,29 @@ public:
     std::vector<SubTask> nodes; // Stores all subtasks (nodes) of this DAG
     std::map<int, int> dot_id_to_node_index; // Maps DOT ID to vector index
 
-    // --- New Members ---
     double volume = -1.0; // Cache calculated volume (-1 indicates not calculated)
     double critical_path_length = -1.0; // Cache calculated length (-1 indicates not calculated)
     int max_core_id_found=-1;
 
-    // --- New Methods ---
+    // --- New Members for Algorithm 1 ---
+    // Maps original node index 'v' to the WCET of its fake predecessor 'vf(v)'
+    std::map<int, double> fake_task_wcets;
+    bool fake_params_generated = false; // Flag if generation was successful
+
     // Calculates the sum of WCETs of all nodes. Caches the result.
     double get_volume();
     // Calculates the length of the critical path (longest path by WCET sum). Caches the result.
     double get_critical_path_length();
-    // --- New Getter ---
     // Returns the minimum number of cores implied (max_core_id + 1)
     // Returns 0 if no core IDs were found (max_core_id_found remains -1)
     // Returns 1 if max_core_id_found is 0.
     int get_required_cores() const;
 
+    // --- New Method for Algorithm 1 ---
+    // Implements Algorithm 1 to generate WCETs for Step 1 fake tasks.
+    // Returns true on success, false on failure (e.g., negative budget).
+    // Stores results in this->fake_task_wcets.
+    bool generate_fake_params(int m); // m = number of cores
 
     // Basic print for debugging
     void print() const {
@@ -69,6 +78,16 @@ private:
     // Helper to get node indices sorted topologically
     std::vector<int> get_topological_order();
 
+    // --- Helpers for Algorithm 1 ---
+    // Calculates len(Ĝ_i) based on current fake_task_wcets
+    double calculate_augmented_critical_path_length(
+        const std::map<int, double>& current_fake_wcets,
+        std::vector<int>& critical_path_nodes // Output: nodes on the critical path
+    );
+    // Calculates len_o: sum of original node WCETs on the given critical path
+    double calculate_original_wcet_on_path(const std::vector<int>& path_nodes);
+    // Placeholder for random distribution
+    void distribute_randomly(double total_budget, std::map<int, double>& distribution_map);
 };
 
 } // namespace DagParser
