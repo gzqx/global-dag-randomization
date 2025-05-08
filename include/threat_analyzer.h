@@ -11,6 +11,12 @@ namespace DagThreat { // New namespace for threat analysis
 
 class ThreatAnalyzer {
 public:
+    struct ThreatParams {
+        double delta_minus = 0.0; // Δ⁻(τ): Time before start for vulnerable window
+        double delta_plus = 0.0;  // Δ⁺(τ): Time after end for vulnerable window
+        double attack_wcet_threshold = 1.0; // C_α(τ): WCET needed by attacker in window
+                                            // Add other parameters if needed (e.g., which attack type 'alpha' from Def 3.1)
+    };
     // Constructor - potentially store references or configuration if needed
     ThreatAnalyzer() = default;
 
@@ -27,7 +33,8 @@ public:
         int ap,
         double tp,
         int num_simulation_runs,
-        unsigned int seed = std::random_device{}() // Use random_device by default
+        //const ThreatParams& threat_params, // Pass threat definition parameters
+        unsigned int seed = std::random_device{}()
     );
 
 private:
@@ -36,11 +43,12 @@ private:
     // It needs to know which subtask is vulnerable and the set of all attacker subtasks.
     // Returns the estimated probability (0.0 to 1.0).
     double estimate_threat_probability(
-        int vulnerable_task_idx,         // Index of the task containing τ_vul
-        int vulnerable_subtask_idx,      // Index of τ_vul within its task's nodes vector
-        const std::set<std::pair<int, int>>& attacker_subtasks, // Set of (task_idx, subtask_idx) for attackers
-        const DagParser::TaskSet& taskset, // Full taskset for context
-        int num_simulation_runs          // Number of simulations this estimate is based on
+        int vulnerable_task_idx,
+        int vulnerable_subtask_idx,
+        const std::set<std::pair<int, int>>& attacker_subtasks,
+        const DagParser::TaskSet& taskset,
+        int num_simulation_runs
+        //const ThreatParams& threat_params // Pass threat definition parameters
     );
 
     // Epsilon threshold function (Definition 3.6)

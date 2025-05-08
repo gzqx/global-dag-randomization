@@ -13,53 +13,10 @@ namespace DagThreat {
 
 // --- Epsilon Threshold Function ---
 double ThreatAnalyzer::epsilon_threshold(double value, double threshold_tp) {
-    // Definition 3.6: ε_tp(y) = 0 if y <= tp, else y
-    // Note: The definition in the paper seems reversed for probability.
-    // If 'value' is the non-threat probability (1-th), and tp is the threat threshold,
-    // then we want ε_tp(1-th).
-    // Let's implement ε_tp(y) directly as defined:
-    // return (value <= threshold_tp) ? 0.0 : value;
-
-    // --- Interpretation based on TH(T) formula ---
-    // The formula is TH(T) = 1 - Π ε_tp(1 - th).
-    // Here, the argument to ε is (1 - th), the probability of *not* being threatened.
-    // If the *threat* probability 'th' is <= tp, then (1-th) >= (1-tp).
-    // If the threat 'th' exceeds 'tp', then (1-th) < (1-tp).
-    // The epsilon function seems intended to zero out the contribution if the
-    // threat is below the threshold tp.
-    // Let y = (1 - th). We want ε_tp(y).
-    // If th <= tp, then y >= 1-tp. We want the product term to be y = 1-th.
-    // If th > tp, then y < 1-tp. We want the product term to be reduced, maybe to 1-tp?
-    // The definition ε_tp(y) = 0 if y <= x doesn't seem right in this context.
-
-    // --- Re-interpreting ε based on likely intent ---
-    // Let's assume ε_tp operates on the *threat* probability 'th' itself,
-    // and the formula meant something like: TH = 1 - Π (1 - ε'_tp(th))
-    // where ε'_tp(th) = 0 if th <= tp, and th if th > tp.
-    // OR, let's assume the formula is correct: TH = 1 - Π ε_tp(1 - th)
-    // and ε_tp(y) should be: y if y >= 1-tp (i.e., th <= tp),
-    // and maybe 1-tp (or some other value) if y < 1-tp (i.e., th > tp)?
-
-    // --- Sticking to the formula as written, but adjusting epsilon interpretation ---
-    // Let y = 1 - th (the non-threat probability)
-    // Let x = tp (the threat threshold)
-    // We want ε_tp(y).
-    // If the threat 'th' is acceptable (th <= tp), then y >= 1-tp. We keep the non-threat prob y.
-    // If the threat 'th' is unacceptable (th > tp), then y < 1-tp. We want to penalize this.
-    // Setting ε_tp(y) = 0 when y < 1-tp would maximize TH, which seems wrong.
-    // Setting ε_tp(y) = 1-tp when y < 1-tp seems plausible - it uses the threshold value.
-
-    // Let's implement the interpretation: Keep non-threat prob if threat <= tp, otherwise use 1-tp.
-    double non_threat_prob = value; // Input 'value' is assumed to be (1 - th)
-    double implied_threat_prob = 1.0 - non_threat_prob;
-
-    if (implied_threat_prob <= threshold_tp) {
-        return non_threat_prob; // Threat is acceptable, use actual non-threat prob
-    } else {
-        // Threat is unacceptable, use the threshold non-threat probability
-        // This prevents one very high threat probability from making TH=1 immediately.
-        return 1.0 - threshold_tp;
-    }
+        // Definition 3.6: ε_tp(y) = 0 if y <= tp, else y
+    // Input 'value' is the threat probability 'th'
+    // Input 'threshold_tp' is the threshold 'tp'
+    return (value <= threshold_tp) ? 0.0 : value;
 }
 
 
@@ -103,7 +60,7 @@ std::set<std::pair<int, int>> ThreatAnalyzer::get_subtask_indices(
 }
 
 
-// --- Placeholder for Threat Probability Estimation ---
+// --- Placeholder for Threat Probability Estimation -
 double ThreatAnalyzer::estimate_threat_probability(
     int vulnerable_task_idx,
     int vulnerable_subtask_idx,
@@ -159,24 +116,58 @@ double ThreatAnalyzer::calculate_TH(
         throw std::invalid_argument("Invalid parameters for TH calculation.");
     }
     if (taskset.tasks.empty()) {
+        // If vp or ap > 0, it's an invalid request for an empty taskset
+        if (vp > 0 || ap > 0) {
+             throw std::invalid_argument("vp or ap cannot be positive for an empty taskset.");
+        }
         return 0.0; // No tasks, no threat
     }
 
-    int n_total_tasks = taskset.tasks.size();
-    if (vp > n_total_tasks || ap > n_total_tasks) {
-         throw std::invalid_argument("vp or ap exceeds total number of tasks.");
+    // --- Calculate TOTAL number of subtasks ---
+    size_t n_total_subtasks = 0;
+    for (const auto& task : taskset.tasks) {
+        n_total_subtasks += task.nodes.size();
     }
+
+
+    // Compare vp and ap against the total number of subtasks
+    if (vp > n_total_subtasks || ap > n_total_subtasks) {
+         throw std::invalid_argument("vp or ap exceeds total number of subtasks in the taskset.");
+    }
+    // --- End Corrected Validation Check ---
 
     std::mt19937 rng(seed); // Initialize random number generator
 
-    // 1. Select Vulnerable and Attacker Task Sets (Indices)
-    std::set<int> vulnerable_task_indices = select_random_task_indices(n_total_tasks, vp, rng);
-    std::set<int> attacker_task_indices = select_random_task_indices(n_total_tasks, ap, rng);
-    // Note: Vulnerable and Attacker sets might overlap, which is allowed by the model.
+ // Create a flat list of all subtasks {task_idx, subtask_idx}
+    std::vector<std::pair<int, int>> all_subtasks_flat;
+    all_subtasks_flat.reserve(n_total_subtasks);
+    for (size_t task_idx = 0; task_idx < taskset.tasks.size(); ++task_idx) {
+        for (size_t subtask_idx = 0; subtask_idx < taskset.tasks[task_idx].nodes.size(); ++subtask_idx) {
+            all_subtasks_flat.push_back({static_cast<int>(task_idx), static_cast<int>(subtask_idx)});
+        }
+    }
 
-    // 2. Get corresponding Subtask Sets (Indices as pairs {task_idx, subtask_idx})
-    std::set<std::pair<int, int>> vulnerable_subtasks = get_subtask_indices(vulnerable_task_indices, taskset);
-    std::set<std::pair<int, int>> attacker_subtasks = get_subtask_indices(attacker_task_indices, taskset);
+    // Shuffle the flat list
+    std::shuffle(all_subtasks_flat.begin(), all_subtasks_flat.end(), rng);
+
+    // Select the first 'vp' as vulnerable and the first 'ap' as attackers
+    // Note: This allows overlap between vulnerable and attacker sets if vp+ap > total,
+    //       or even if they just happen to be selected in the shuffle.
+    //       The paper doesn't explicitly forbid overlap.
+    std::set<std::pair<int, int>> vulnerable_subtasks;
+    for (int i = 0; i < vp; ++i) {
+        vulnerable_subtasks.insert(all_subtasks_flat[i]);
+    }
+
+    std::set<std::pair<int, int>> attacker_subtasks;
+    // To avoid selecting the exact same subtasks if vp and ap overlap significantly,
+    // we could select from the remaining list, or just select the first 'ap' as below.
+    // Let's stick to selecting the first 'ap' for simplicity, allowing overlap.
+    for (int i = 0; i < ap; ++i) {
+        attacker_subtasks.insert(all_subtasks_flat[i]);
+    }
+    // --- End Subtask Selection ---
+
 
     if (vulnerable_subtasks.empty()) {
         return 0.0; // No vulnerable subtasks selected, TH = 0
@@ -198,14 +189,14 @@ double ThreatAnalyzer::calculate_TH(
             num_simulation_runs
         );
 
-        // Calculate non-threat probability
-        double non_threat_prob = 1.0 - th;
+        // Apply epsilon directly to the threat probability 'th'
+        double effective_threat = epsilon_threshold(th, tp); // ε_tp(th)
 
-        // Apply epsilon threshold function
-        double epsilon_result = epsilon_threshold(non_threat_prob, tp);
+        // Calculate the term for the product: (1 - effective_threat)
+        double term = 1.0 - effective_threat;
 
         // Multiply into the product term
-        product_term *= epsilon_result;
+        product_term *= term;
 
         // Optimization: if product becomes near zero, further multiplication won't change it much
         if (product_term < 1e-12) { // Use a small tolerance
@@ -219,6 +210,5 @@ double ThreatAnalyzer::calculate_TH(
 
     return std::max(0.0, std::min(1.0, th_result)); // Clamp result to [0, 1]
 }
-
 
 } // namespace DagThreat
