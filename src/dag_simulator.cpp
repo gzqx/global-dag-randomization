@@ -49,13 +49,13 @@ struct ReadyComparator {
 
 // --- DagSimulator Implementation ---
 
-std::vector<SimulationEvent> DagSimulator::simulate_single_instance(DagParser::DAGTask& dag) {
+std::vector<SimulationEvent> DagSimulator::simulate_single_instance(DagParser::DAGTask& dag, int num_cores_to_use) {
 
     if (dag.nodes.empty()) {
         throw std::runtime_error("Cannot simulate an empty DAG.");
     }
 
-    int num_cores = dag.get_required_cores();
+    int num_cores = num_cores_to_use;
     if (num_cores <= 0) {
          // If max_core_id_found was -1, get_required_cores returns 0.
          // We need at least one core to run anything.

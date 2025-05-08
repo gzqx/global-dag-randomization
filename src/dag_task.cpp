@@ -365,45 +365,207 @@ double DAGTask::calculate_original_wcet_on_path(const std::vector<int>& path_nod
 
 
 // --- Private Helper: distribute_randomly ---
-// Simple proportional distribution (replace with actual random if needed)
 void DAGTask::distribute_randomly(double total_budget, std::map<int, double>& distribution_map) {
-    if (distribution_map.empty()) return;
+    if (distribution_map.empty()) {
+        return; // Nothing to distribute
+    }
 
-    double total_original_wcet_involved = 0.0;
+    // Ensure all map entries exist, initialize to 0.0 (will be overwritten)
+    // This also allows us to easily get the count 'n'.
+    for (auto it = distribution_map.begin(); it != distribution_map.end(); ++it) {
+         it->second = 0.0;
+    }
+
+    size_t n = distribution_map.size();
+    long long budget_to_distribute = std::floor(total_budget);
+
+    // Handle non-positive budget
+    if (budget_to_distribute <= 0) {
+        // Set all to 0 (already done implicitly, but good to be explicit)
+        for (auto it = distribution_map.begin(); it != distribution_map.end(); ++it) {
+             it->second = 0.0;
+        }
+        return;
+    }
+
+    // --- Use UUniFast-like approach for dividing the budget ---
+    std::random_device rd;
+    std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
+    std::uniform_real_distribution<> dis(0.0, 1.0);
+
+    std::vector<double> random_points(n - 1);
+    for (size_t i = 0; i < n - 1; ++i) {
+        random_points[i] = dis(gen); // Generate n-1 random points
+    }
+    std::sort(random_points.begin(), random_points.end()); // Sort them
+
+    // Create n intervals based on sorted points
+    std::vector<double> shares(n);
+    double prev_point = 0.0;
+    for (size_t i = 0; i < n - 1; ++i) {
+        shares[i] = random_points[i] - prev_point;
+        prev_point = random_points[i];
+    }
+    shares[n - 1] = 1.0 - prev_point; // Last share goes up to 1.0
+
+    // --- Assign integer parts based on shares and distribute remainder ---
+    long long total_assigned = 0;
+    std::vector<int> node_indices; // Need indices to iterate consistently
+    node_indices.reserve(n);
     for(const auto& pair : distribution_map) {
-        int node_idx = pair.first;
-        if (node_idx >= 0 && node_idx < nodes.size()) {
-             total_original_wcet_involved += nodes[node_idx].wcet;
+        node_indices.push_back(pair.first);
+    }
+
+    // Assign floored values
+    for (size_t i = 0; i < n; ++i) {
+        int node_idx = node_indices[i];
+        long long assigned_wcet = std::floor(shares[i] * budget_to_distribute);
+        distribution_map[node_idx] = static_cast<double>(assigned_wcet);
+        total_assigned += assigned_wcet;
+    }
+
+    // Calculate remainder due to flooring
+    long long remainder = budget_to_distribute - total_assigned;
+
+    // Distribute remainder randomly
+    if (remainder > 0) {
+        // Create a shuffled list of indices to distribute remainder fairly
+        std::vector<int> shuffled_indices = node_indices;
+        std::shuffle(shuffled_indices.begin(), shuffled_indices.end(), gen);
+
+        for (long long i = 0; i < remainder; ++i) {
+            // Assign +1 to the first 'remainder' tasks in the shuffled list
+            int node_idx_to_increment = shuffled_indices[i % n]; // Use modulo just in case remainder > n (shouldn't happen with floor)
+            distribution_map[node_idx_to_increment] += 1.0;
         }
     }
 
-    if (total_original_wcet_involved <= 1e-9) {
-        // Avoid division by zero, distribute equally if original WCETs are zero
-        double budget_per_node = total_budget / distribution_map.size();
-        for (auto it = distribution_map.begin(); it != distribution_map.end(); ++it) {
-            it->second = std::max(0.0, budget_per_node);
+    // Final check for non-negativity (should be guaranteed by logic)
+    for (auto it = distribution_map.begin(); it != distribution_map.end(); ++it) {
+        if (it->second < 0.0) {
+             // This should ideally not happen with the floor approach
+             std::cerr << "Warning: Negative WCET assigned in distribute_randomly. Setting to 0." << std::endl;
+             it->second = 0.0;
         }
-    } else {
-        // Distribute proportionally to original WCET (example strategy)
-        double remaining_budget = total_budget;
-        for (auto it = distribution_map.begin(); it != distribution_map.end(); ++it) {
-             int node_idx = it->first;
-             double proportion = (nodes[node_idx].wcet / total_original_wcet_involved);
-             // Use floor to avoid exceeding budget slightly due to multiple ceilings later?
-             // Or stick to ceil as per pseudocode intention? Let's use floor for budget safety.
-             double assigned_wcet = std::floor(total_budget * proportion);
-             it->second = std::max(0.0, assigned_wcet);
-             remaining_budget -= it->second;
+         // Ensure integer value is stored, although map is double
+         it->second = std::floor(it->second);
+    }
+
+}
+
+DAGTask DAGTask::create_augmented_graph_step1() const {
+    if (!fake_params_generated) {
+        throw std::runtime_error("Cannot create augmented graph: fake parameters have not been successfully generated.");
+    }
+    if (nodes.empty()) {
+        return DAGTask(); // Return empty task if original is empty
+    }
+
+    DAGTask augmented_dag;
+    augmented_dag.period = this->period;
+    augmented_dag.deadline = this->deadline;
+    augmented_dag.max_core_id_found = this->max_core_id_found; // Inherit core info if needed later
+    augmented_dag.source_file_path = this->source_file_path + " (augmented)";
+
+    // Mappings:
+    // original_idx -> augmented_idx (for original nodes)
+    std::map<int, int> orig_to_aug_idx;
+    // original_idx -> augmented_idx (for fake nodes vf(original_idx))
+    std::map<int, int> orig_to_fake_idx;
+
+    int aug_idx_counter = 0;
+
+    // --- Pass 1: Create all nodes (original and fake) in the new graph ---
+    for (size_t i = 0; i < this->nodes.size(); ++i) {
+        const SubTask& original_node = this->nodes[i];
+
+        // Add fake node first if needed (and not source)
+        if (this->fake_task_wcets.count(i)) { // Check if node 'i' has a fake predecessor
+            augmented_dag.nodes.emplace_back();
+            SubTask& fake_node = augmented_dag.nodes.back();
+            fake_node.id = aug_idx_counter;
+            // Use negative original_dot_id to distinguish fake nodes if needed
+            fake_node.original_dot_id = -(original_node.original_dot_id + 1); // Example convention
+            fake_node.wcet = this->fake_task_wcets.at(i);
+            // Fake nodes don't have core IDs in this model
+            orig_to_fake_idx[i] = aug_idx_counter;
+            aug_idx_counter++;
         }
-        // Distribute any small remaining budget (due to floor) to the first node, for example
-        if (remaining_budget > 0 && !distribution_map.empty()) {
-             distribution_map.begin()->second += remaining_budget;
+
+        // Add original node
+        augmented_dag.nodes.push_back(original_node); // Copy original node data
+        augmented_dag.nodes.back().id = aug_idx_counter; // Assign new sequential ID
+        // Clear old simulation state and adjacency from the copy
+        augmented_dag.nodes.back().reset_simulation_state(); // Reset state for simulation
+        augmented_dag.nodes.back().predecessors.clear();
+        augmented_dag.nodes.back().successors.clear();
+        orig_to_aug_idx[i] = aug_idx_counter;
+        aug_idx_counter++;
+    }
+
+    // --- Pass 2: Wire up predecessors and successors ---
+    for (size_t i = 0; i < this->nodes.size(); ++i) {
+        const SubTask& original_node = this->nodes[i];
+        int current_aug_orig_idx = orig_to_aug_idx.at(i);
+
+        if (orig_to_fake_idx.count(i)) {
+            // Node 'i' has a fake predecessor vf(i)
+            int current_aug_fake_idx = orig_to_fake_idx.at(i);
+
+            // 1. Link vf(i) -> v
+            augmented_dag.nodes[current_aug_fake_idx].successors.push_back(current_aug_orig_idx);
+            augmented_dag.nodes[current_aug_orig_idx].predecessors.push_back(current_aug_fake_idx);
+
+            // 2. Link original predecessors u -> vf(i)
+            for (int orig_pred_idx : original_node.predecessors) {
+                if (orig_to_aug_idx.count(orig_pred_idx)) {
+                    int aug_pred_idx = orig_to_aug_idx.at(orig_pred_idx);
+                    augmented_dag.nodes[aug_pred_idx].successors.push_back(current_aug_fake_idx);
+                    augmented_dag.nodes[current_aug_fake_idx].predecessors.push_back(aug_pred_idx);
+                } else {
+                     throw std::runtime_error("Internal error: Original predecessor index not found in mapping during augmentation.");
+                }
+            }
+        } else {
+            // Node 'i' is the source node (no fake predecessor)
+            // Link source -> original successors w
+            for (int orig_succ_idx : original_node.successors) {
+                 // Successor 'w' might have a fake node vf(w) or not
+                 int target_node_idx = -1;
+                 if (orig_to_fake_idx.count(orig_succ_idx)) {
+                     // Link source 'i' to fake node vf(w)
+                     target_node_idx = orig_to_fake_idx.at(orig_succ_idx);
+                 } else {
+                      // This case should not happen if successor is not source and has preds
+                      // If successor IS source (cycle?) or has no preds, link directly
+                      // However, Step 1 only adds fake tasks for nodes with preds.
+                      // Let's assume successors are non-source and have fake tasks.
+                      // If a successor truly has no predecessors (other than source),
+                      // it wouldn't have a fake task. Link directly to original.
+                      if (this->nodes[orig_succ_idx].predecessors.empty()) {
+                           target_node_idx = orig_to_aug_idx.at(orig_succ_idx);
+                      } else {
+                           // This implies orig_succ_idx should have had a fake task
+                           throw std::runtime_error("Internal error: Successor node missing expected fake task during augmentation.");
+                      }
+                 }
+
+                 if (target_node_idx != -1) {
+                     augmented_dag.nodes[current_aug_orig_idx].successors.push_back(target_node_idx);
+                     augmented_dag.nodes[target_node_idx].predecessors.push_back(current_aug_orig_idx);
+                 }
+            }
         }
     }
-     // Ensure non-negativity just in case
-     for (auto it = distribution_map.begin(); it != distribution_map.end(); ++it) {
-         if (it->second < 0.0) it->second = 0.0;
-     }
+
+    // Reset simulation state for all nodes in the newly created graph
+    // (reset_simulation_state was called on original nodes, need to call on fake nodes too)
+    for(auto& node : augmented_dag.nodes) {
+        node.reset_simulation_state(); // Ensures correct initial state (READY/NOT_READY)
+    }
+
+
+    return augmented_dag;
 }
 
 } // namespace DagParser

@@ -17,6 +17,7 @@ file(GLOB LIB_SOURCES
     "src/dot_parser.cpp"
     "src/taskset_loader.cpp"
     "src/dag_simulator.cpp"
+    "src/threat_analyzer.cpp"
 )
 
 add_library(dag_parser STATIC ${LIB_SOURCES})

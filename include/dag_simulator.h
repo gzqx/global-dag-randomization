@@ -14,7 +14,10 @@ public:
     // Assumes G-EDF non-preemptive scheduling.
     // Returns a timeline of events.
     // Throws std::runtime_error if DAG has no nodes or requires 0 cores.
-    std::vector<SimulationEvent> simulate_single_instance(DagParser::DAGTask& dag);
+    std::vector<SimulationEvent> simulate_single_instance(
+            DagParser::DAGTask& dag,
+            int num_cores_to_use
+            );
 
 private:
     // Helper function to find the highest priority (earliest deadline) ready task

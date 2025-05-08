@@ -45,6 +45,12 @@ public:
     // Stores results in this->fake_task_wcets.
     bool generate_fake_params(int m); // m = number of cores
 
+    // Creates and returns a new DAGTask representing the graph augmented
+    // with the Step 1 fake tasks (vf). Requires generate_fake_params
+    // to have been called successfully first.
+    // Throws std::runtime_error if fake params not generated.
+    DAGTask create_augmented_graph_step1() const;
+
     // Basic print for debugging
     void print() const {
         std::cout << "DAG Task (Source: " << source_file_path << ")\n"
