@@ -1,14 +1,15 @@
 #ifndef DAG_TASK_H
 #define DAG_TASK_H
 
-
 #include "sub_task.h"
 #include <vector>
 #include <map>
 #include <string>
 #include <iostream>
 #include <limits>
-#include <optional> // For returning optional map
+#include <optional>
+#include <set>     // For std::set
+#include <random>  // For std::mt19937
 
 namespace DagParser {
 
@@ -29,6 +30,8 @@ public:
     // Maps original node index 'v' to the WCET of its fake predecessor 'vf(v)'
     std::map<int, double> fake_task_wcets;
     bool fake_params_generated = false; // Flag if generation was successful
+                                        //
+    bool generate_fake_params(int m, std::mt19937& rng); // <-- ADDED rng parameter
 
     // Calculates the sum of WCETs of all nodes. Caches the result.
     double get_volume();
@@ -45,11 +48,28 @@ public:
     // Stores results in this->fake_task_wcets.
     bool generate_fake_params(int m); // m = number of cores
 
-    // Creates and returns a new DAGTask representing the graph augmented
+        // Creates and returns a new DAGTask representing the graph augmented
     // with the Step 1 fake tasks (vf). Requires generate_fake_params
     // to have been called successfully first.
     // Throws std::runtime_error if fake params not generated.
     DAGTask create_augmented_graph_step1() const;
+
+    // --- New Methods for Marking Vulnerable/Attacker Subtasks ---
+    // Marks a fraction of original subtasks randomly.
+    // num_vulnerable: how many original subtasks to mark as vulnerable.
+    // num_attacker: how many original subtasks to mark as attacker-controlled.
+    // rng: random number generator.
+    // Note: A subtask can be both vulnerable and attacker-controlled if selected by both.
+    void mark_subtasks_randomly(int num_vulnerable, int num_attacker, std::mt19937& rng);
+
+    // Marks subtasks based on their original DOT IDs.
+    // vulnerable_dot_ids: Set of original DOT IDs to mark as vulnerable.
+    // attacker_dot_ids: Set of original DOT IDs to mark as attacker-controlled.
+    void mark_subtasks_by_id(const std::set<int>& vulnerable_dot_ids,
+                             const std::set<int>& attacker_dot_ids);
+
+    // Clears all vulnerable/attacker markings and resets threat parameters on subtasks.
+    void clear_threat_markings();
 
     // Basic print for debugging
     void print() const {
@@ -93,7 +113,7 @@ private:
     // Calculates len_o: sum of original node WCETs on the given critical path
     double calculate_original_wcet_on_path(const std::vector<int>& path_nodes);
     // Placeholder for random distribution
-    void distribute_randomly(double total_budget, std::map<int, double>& distribution_map);
+    void distribute_randomly(double total_budget, std::map<int, double>& distribution_map, std::mt19937& rng);
 };
 
 } // namespace DagParser

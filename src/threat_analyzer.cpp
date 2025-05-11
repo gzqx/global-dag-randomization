@@ -1,13 +1,16 @@
 #include "threat_analyzer.h"
-#include "dag_task.h" // Access DAGTask members
+#include "dag_task.h"
+#include "dag_simulator.h" // For DagSimulator
+#include "simulation_event.h" // For SimulationEvent
 #include <vector>
 #include <set>
-#include <numeric>   // For std::iota
-#include <random>    // For std::mt19937, std::shuffle, std::random_device
-#include <cmath>     // For std::max
-#include <algorithm>
+#include <map> // For mapping original_dot_id to execution times
+#include <numeric>
+#include <random>
+#include <cmath>
 #include <stdexcept>
-#include <iostream>  // For warnings/debug
+#include <iostream>
+#include <algorithm>
 
 namespace DagThreat {
 
@@ -61,154 +64,269 @@ std::set<std::pair<int, int>> ThreatAnalyzer::get_subtask_indices(
 
 
 // --- Placeholder for Threat Probability Estimation -
-double ThreatAnalyzer::estimate_threat_probability(
-    int vulnerable_task_idx,
-    int vulnerable_subtask_idx,
-    const std::set<std::pair<int, int>>& attacker_subtasks,
-    const DagParser::TaskSet& taskset,
-    int num_simulation_runs)
-{
-    // ***********************************************************************
-    // ********************* PLACEHOLDER IMPLEMENTATION **********************
-    // ***********************************************************************
-    // This function needs to be replaced with logic that uses the results
-    // of 'num_simulation_runs' multi-task simulations.
-    //
-    // Conceptual Logic:
-    // 1. threat_count = 0
-    // 2. For run = 1 to num_simulation_runs:
-    // 3.   Simulate the system (at least vulnerable_task_idx and all tasks
-    //        containing attacker subtasks) with appropriate randomization applied.
-    // 4.   Get the resulting timeline for this run.
-    // 5.   Find the start/end time of vulnerable_subtask in the timeline.
-    // 6.   Define the vulnerable window ν based on start/end times (and Δ parameters - currently undefined).
-    // 7.   Define the required attack time C_α (currently undefined).
-    // 8.   For each attacker subtask (att_task_idx, att_subtask_idx) in attacker_subtasks:
-    // 9.      Calculate the execution time of the attacker subtask within ν in this timeline.
-    // 10.     If execution_time > C_α:
-    // 11.        threat_count++;
-    // 12.        break; // Move to next simulation run
-    // 13. Return (double)threat_count / num_simulation_runs;
-    // ***********************************************************************
 
-    // Simple Placeholder: Return a dummy value (e.g., 0.1 or based on indices)
-    // This allows testing the structure of calculate_TH.
-    // DO NOT USE THIS IN PRODUCTION.
-    if (attacker_subtasks.empty()) return 0.0; // No attackers, no threat
-    // Example dummy: small probability, increases slightly with index
-    double base_prob = 0.05;
-    double increment = (double)(vulnerable_task_idx + vulnerable_subtask_idx % 10) * 0.001;
-    return std::min(1.0, base_prob + increment);
-    // return 0.0; // Or just return 0 for testing structure
+double ThreatAnalyzer::estimate_threat_probability(
+    int vulnerable_task_idx, // Should be 0
+    int vulnerable_subtask_original_idx,
+    const DagParser::SubTask& vulnerable_subtask_ref, // Contains Δ⁻, Δ⁺, Cα
+    DagParser::AttackType attack_type_to_evaluate,
+    const std::set<std::pair<int, int>>& attacker_subtask_identifiers, // Original {0, subtask_idx}
+    DagParser::DAGTask& original_dag, // Pass by non-const ref
+    int num_cores,
+    int num_simulation_runs,
+    std::mt19937& rng)
+{
+    if (num_simulation_runs <= 0) return 0.0;
+    if (vulnerable_task_idx != 0) {
+        // This function is now designed for a single DAG context
+        throw std::logic_error("estimate_threat_probability called with vulnerable_task_idx != 0 in single DAG mode.");
+    }
+
+    int threat_occurred_count = 0;
+    DagSim::DagSimulator simulator; // Create one simulator instance
+
+    int vulnerable_subtask_dot_id = vulnerable_subtask_ref.original_dot_id;
+
+    for (int run = 0; run < num_simulation_runs; ++run) {
+        // 1. Regenerate Fake Task Parameters for the original_dag
+        bool params_ok = original_dag.generate_fake_params(num_cores, rng); // Uses its internal rng or needs one passed
+        if (!params_ok) {
+            std::cerr << "Warning: Run " << run << ": Failed to generate fake params. Skipping run." << std::endl;
+            continue;
+        }
+
+        // 2. Create Augmented Graph
+        DagParser::DAGTask augmented_dag;
+        try {
+            augmented_dag = original_dag.create_augmented_graph_step1();
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Run " << run << ": Failed to create augmented graph: " << e.what() << ". Skipping run." << std::endl;
+            continue;
+        }
+        if (augmented_dag.nodes.empty()) {
+            std::cerr << "Warning: Run " << run << ": Augmented graph is empty. Skipping run." << std::endl;
+            continue;
+        }
+
+
+        // 3. Simulate Augmented Graph
+        std::vector<DagSim::SimulationEvent> timeline;
+        try {
+            timeline = simulator.simulate_single_instance(augmented_dag, num_cores);
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: Run " << run << ": Simulation of augmented graph failed: " << e.what() << ". Skipping run." << std::endl;
+            continue;
+        }
+
+        // 4. Find execution of the original vulnerable subtask in the augmented timeline
+        double vul_actual_start_time = -1.0;
+        double vul_actual_end_time = -1.0;
+
+        for (size_t aug_idx = 0; aug_idx < augmented_dag.nodes.size(); ++aug_idx) {
+            if (augmented_dag.nodes[aug_idx].original_dot_id == vulnerable_subtask_dot_id) {
+                // Find its START and FINISH events in the timeline
+                for (const auto& event : timeline) {
+                    if (event.subtask_id == augmented_dag.nodes[aug_idx].id) { // event.subtask_id is augmented index
+                        if (event.type == DagSim::EventType::START) vul_actual_start_time = event.timestamp;
+                        if (event.type == DagSim::EventType::FINISH) vul_actual_end_time = event.timestamp;
+                    }
+                }
+                break; // Found the original vulnerable subtask
+            }
+        }
+
+        if (vul_actual_start_time < 0 || vul_actual_end_time < 0) {
+            // std::cerr << "Warning: Run " << run << ": Vulnerable subtask (dot_id " << vulnerable_subtask_dot_id
+            //           << ") did not execute or complete in simulation. Skipping threat check for this run." << std::endl;
+            continue;
+        }
+
+        // 5. Calculate Vulnerable Window for the specified attack_type
+        std::vector<std::pair<double, double>> vulnerable_windows =
+            ThreatAnalyzer::calculate_vulnerable_window(
+                attack_type_to_evaluate,
+                vul_actual_start_time,
+                vul_actual_end_time,
+                vulnerable_subtask_ref.delta_minus,
+                vulnerable_subtask_ref.delta_plus
+            );
+
+        if (vulnerable_windows.empty()) {
+            continue; // No window, no threat possible for this run
+        }
+
+        // 6. Check attacker execution within these windows
+        bool threat_this_run = false;
+        for (const auto& att_id_pair : attacker_subtask_identifiers) {
+            // att_id_pair is {0, original_attacker_subtask_idx}
+            int original_attacker_subtask_dot_id = original_dag.nodes[att_id_pair.second].original_dot_id;
+            double attacker_execution_in_window = 0.0;
+
+            // Find this attacker subtask in the augmented graph and its execution
+            for (size_t aug_idx = 0; aug_idx < augmented_dag.nodes.size(); ++aug_idx) {
+                if (augmented_dag.nodes[aug_idx].original_dot_id == original_attacker_subtask_dot_id) {
+                    double att_start = -1.0, att_end = -1.0;
+                    for (const auto& event : timeline) {
+                        if (event.subtask_id == augmented_dag.nodes[aug_idx].id) {
+                            if (event.type == DagSim::EventType::START) att_start = event.timestamp;
+                            if (event.type == DagSim::EventType::FINISH) att_end = event.timestamp;
+                        }
+                    }
+
+                    if (att_start >= 0 && att_end >= 0) {
+                        // Calculate overlap
+                        for (const auto& window : vulnerable_windows) {
+                            double overlap_start = std::max(att_start, window.first);
+                            double overlap_end = std::min(att_end, window.second);
+                            if (overlap_end > overlap_start) {
+                                attacker_execution_in_window += (overlap_end - overlap_start);
+                            }
+                        }
+                    }
+                    break; // Found this attacker subtask
+                }
+            }
+
+            if (attacker_execution_in_window >= vulnerable_subtask_ref.c_alpha_requirement) {
+                threat_this_run = true;
+                break; // One attacker succeeded, threat occurred for this run
+            }
+        }
+
+        if (threat_this_run) {
+            threat_occurred_count++;
+        }
+    } // End simulation runs loop
+
+    return static_cast<double>(threat_occurred_count) / num_simulation_runs;
 }
 
 
 // --- Calculate TH (Definition 3.7) ---
 double ThreatAnalyzer::calculate_TH(
     const DagParser::TaskSet& taskset,
-    int vp,
-    int ap,
-    double tp, // Threat probability threshold
-    int num_simulation_runs,
+    int vp, int ap, double tp,
+    DagParser::AttackType attack_type_to_evaluate,
+    int num_simulation_runs, // This is N for the inner loop
     unsigned int seed)
 {
-    if (vp < 0 || ap < 0 || tp < 0.0 || tp > 1.0 || num_simulation_runs <= 0) {
-        throw std::invalid_argument("Invalid parameters for TH calculation.");
+    // ... (parameter validation) ...
+    if (taskset.tasks.size() != 1) {
+        throw std::invalid_argument("calculate_TH (single DAG mode) expects a taskset with exactly one DAG.");
     }
-    if (taskset.tasks.empty()) {
-        // If vp or ap > 0, it's an invalid request for an empty taskset
-        if (vp > 0 || ap > 0) {
-             throw std::invalid_argument("vp or ap cannot be positive for an empty taskset.");
+    DagParser::DAGTask original_dag = taskset.tasks[0]; // Work on a copy for marking
+
+
+    std::mt19937 rng(seed);
+
+    // Mark vulnerable and attacker subtasks ONCE at the beginning on the original_dag copy
+    original_dag.mark_subtasks_randomly(vp, ap, rng); // This sets is_vulnerable, is_attacker, Δs, Cα
+
+    std::set<std::pair<int, int>> all_vulnerable_subtasks_in_dag;
+    for(size_t i=0; i < original_dag.nodes.size(); ++i) {
+        if(original_dag.nodes[i].is_vulnerable) {
+            all_vulnerable_subtasks_in_dag.insert({0, static_cast<int>(i)});
         }
-        return 0.0; // No tasks, no threat
     }
-
-    // --- Calculate TOTAL number of subtasks ---
-    size_t n_total_subtasks = 0;
-    for (const auto& task : taskset.tasks) {
-        n_total_subtasks += task.nodes.size();
-    }
-
-
-    // Compare vp and ap against the total number of subtasks
-    if (vp > n_total_subtasks || ap > n_total_subtasks) {
-         throw std::invalid_argument("vp or ap exceeds total number of subtasks in the taskset.");
-    }
-    // --- End Corrected Validation Check ---
-
-    std::mt19937 rng(seed); // Initialize random number generator
-
- // Create a flat list of all subtasks {task_idx, subtask_idx}
-    std::vector<std::pair<int, int>> all_subtasks_flat;
-    all_subtasks_flat.reserve(n_total_subtasks);
-    for (size_t task_idx = 0; task_idx < taskset.tasks.size(); ++task_idx) {
-        for (size_t subtask_idx = 0; subtask_idx < taskset.tasks[task_idx].nodes.size(); ++subtask_idx) {
-            all_subtasks_flat.push_back({static_cast<int>(task_idx), static_cast<int>(subtask_idx)});
+    std::set<std::pair<int, int>> all_attacker_subtasks_in_dag;
+     for(size_t i=0; i < original_dag.nodes.size(); ++i) {
+        if(original_dag.nodes[i].is_attacker_controlled) {
+            all_attacker_subtasks_in_dag.insert({0, static_cast<int>(i)});
         }
     }
 
-    // Shuffle the flat list
-    std::shuffle(all_subtasks_flat.begin(), all_subtasks_flat.end(), rng);
-
-    // Select the first 'vp' as vulnerable and the first 'ap' as attackers
-    // Note: This allows overlap between vulnerable and attacker sets if vp+ap > total,
-    //       or even if they just happen to be selected in the shuffle.
-    //       The paper doesn't explicitly forbid overlap.
-    std::set<std::pair<int, int>> vulnerable_subtasks;
-    for (int i = 0; i < vp; ++i) {
-        vulnerable_subtasks.insert(all_subtasks_flat[i]);
+    if (all_vulnerable_subtasks_in_dag.empty()) {
+        return 0.0;
     }
 
-    std::set<std::pair<int, int>> attacker_subtasks;
-    // To avoid selecting the exact same subtasks if vp and ap overlap significantly,
-    // we could select from the remaining list, or just select the first 'ap' as below.
-    // Let's stick to selecting the first 'ap' for simplicity, allowing overlap.
-    for (int i = 0; i < ap; ++i) {
-        attacker_subtasks.insert(all_subtasks_flat[i]);
-    }
-    // --- End Subtask Selection ---
-
-
-    if (vulnerable_subtasks.empty()) {
-        return 0.0; // No vulnerable subtasks selected, TH = 0
-    }
-
-    // 3. Calculate Product Term: Π_{τ ∈ T_vul} ε_{tp}(1 - th_{T_att}(τ))
     double product_term = 1.0;
 
-    for (const auto& vul_pair : vulnerable_subtasks) {
-        int vul_task_idx = vul_pair.first;
-        int vul_subtask_idx = vul_pair.second; // Index within task vul_task_idx
+    for (const auto& vul_id_pair : all_vulnerable_subtasks_in_dag) {
+        // vul_id_pair is {0, original_subtask_idx}
+        int vul_subtask_original_idx = vul_id_pair.second;
+        const DagParser::SubTask& vulnerable_subtask_ref = original_dag.nodes[vul_subtask_original_idx];
 
-        // Estimate threat probability using the placeholder
+        // Estimate threat probability for this specific vulnerable subtask
         double th = estimate_threat_probability(
-            vul_task_idx,
-            vul_subtask_idx,
-            attacker_subtasks,
-            taskset,
-            num_simulation_runs
+            0, // vulnerable_task_idx is always 0
+            vul_subtask_original_idx,
+            vulnerable_subtask_ref,
+            attack_type_to_evaluate, // Pass the chosen attack type
+            all_attacker_subtasks_in_dag,
+            original_dag, // Pass the original_dag (which will have its fake params regenerated inside)
+            original_dag.get_required_cores() > 0 ? original_dag.get_required_cores() : 1, // Use parsed cores or 1
+            num_simulation_runs,
+            rng // Pass the RNG
         );
 
-        // Apply epsilon directly to the threat probability 'th'
-        double effective_threat = epsilon_threshold(th, tp); // ε_tp(th)
+        double effective_threat = epsilon_threshold(th, tp);
+        product_term *= (1.0 - effective_threat);
 
-        // Calculate the term for the product: (1 - effective_threat)
-        double term = 1.0 - effective_threat;
-
-        // Multiply into the product term
-        product_term *= term;
-
-        // Optimization: if product becomes near zero, further multiplication won't change it much
-        if (product_term < 1e-12) { // Use a small tolerance
-             product_term = 0.0;
-             break;
-        }
+        if (product_term < 1e-12) { product_term = 0.0; break; }
     }
 
-    // 4. Calculate TH(T) = 1 - Product Term
     double th_result = 1.0 - product_term;
+    return std::max(0.0, std::min(1.0, th_result));
+}
 
-    return std::max(0.0, std::min(1.0, th_result)); // Clamp result to [0, 1]
+std::vector<std::pair<double, double>> ThreatAnalyzer::calculate_vulnerable_window(
+    DagParser::AttackType attack_type,
+    double subtask_sim_start_time, // t_s(τ)
+    double subtask_sim_end_time,   // t_e(τ)
+    double delta_minus,            // Δ⁻(τ)
+    double delta_plus              // Δ⁺(τ)
+) {
+    std::vector<std::pair<double, double>> windows;
+
+    if (subtask_sim_start_time < 0 || subtask_sim_end_time < 0 || subtask_sim_start_time > subtask_sim_end_time) {
+        // Invalid simulation times, return empty window
+        // Or throw an error, depending on desired strictness
+        std::cerr << "Warning: Invalid simulation times for vulnerable window calculation: start="
+                  << subtask_sim_start_time << ", end=" << subtask_sim_end_time << std::endl;
+        return windows;
+    }
+
+    // Ensure deltas are non-negative
+    delta_minus = std::max(0.0, delta_minus);
+    delta_plus  = std::max(0.0, delta_plus);
+
+    switch (attack_type) {
+        case DagParser::AttackType::ANTERIOR:
+            // [t_s(τ) - Δ⁻(τ), t_s(τ)]
+            // Ensure start of window is not negative
+            windows.push_back({std::max(0.0, subtask_sim_start_time - delta_minus), subtask_sim_start_time});
+            break;
+
+        case DagParser::AttackType::POSTERIOR:
+            // [t_e(τ), t_e(τ) + Δ⁺(τ)]
+            windows.push_back({subtask_sim_end_time, subtask_sim_end_time + delta_plus});
+            break;
+
+        case DagParser::AttackType::PINCER_SINGLE_WINDOW: // Assuming C_alpha is for the combined duration
+        case DagParser::AttackType::PINCER_DUAL_WINDOW:   // Or if C_alpha is split
+            // [t_s(τ) - Δ⁻(τ), t_s(τ)] U [t_e(τ), t_e(τ) + Δ⁺(τ)]
+            windows.push_back({std::max(0.0, subtask_sim_start_time - delta_minus), subtask_sim_start_time});
+            windows.push_back({subtask_sim_end_time, subtask_sim_end_time + delta_plus});
+            break;
+
+        case DagParser::AttackType::CONCURRENT:
+            // [t_s(τ), t_e(τ)]
+            windows.push_back({subtask_sim_start_time, subtask_sim_end_time});
+            break;
+
+        case DagParser::AttackType::NONE:
+        default:
+            // No defined window or unknown attack type
+            break;
+    }
+
+    // Filter out zero-duration or invalid (end < start) windows that might result from t_s=t_e
+    windows.erase(std::remove_if(windows.begin(), windows.end(), [](const auto& p){
+        return p.second <= p.first; // Remove if end <= start
+    }), windows.end());
+
+
+    return windows;
 }
 
 } // namespace DagThreat

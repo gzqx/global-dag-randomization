@@ -144,7 +144,7 @@ int DAGTask::get_required_cores() const {
 }
 
 // --- New Method: generate_fake_params (Algorithm 1) ---
-bool DAGTask::generate_fake_params(int m) {
+bool DAGTask::generate_fake_params(int m, std::mt19937& rng) {
     fake_params_generated = false; // Reset flag
     fake_task_wcets.clear();
 
@@ -186,7 +186,7 @@ bool DAGTask::generate_fake_params(int m) {
 
 
     // Line 9: Initial Distribution
-    distribute_randomly(initial_budget, fake_task_wcets);
+    distribute_randomly(initial_budget, fake_task_wcets, rng);
 
     // Line 10-21: Repeat loop
     double rhs_budget = m * deadline - vol_Gi; // Constant part of RHS
@@ -365,7 +365,7 @@ double DAGTask::calculate_original_wcet_on_path(const std::vector<int>& path_nod
 
 
 // --- Private Helper: distribute_randomly ---
-void DAGTask::distribute_randomly(double total_budget, std::map<int, double>& distribution_map) {
+void DAGTask::distribute_randomly(double total_budget, std::map<int, double>& distribution_map, std::mt19937& rng) {
     if (distribution_map.empty()) {
         return; // Nothing to distribute
     }
@@ -389,13 +389,13 @@ void DAGTask::distribute_randomly(double total_budget, std::map<int, double>& di
     }
 
     // --- Use UUniFast-like approach for dividing the budget ---
-    std::random_device rd;
-    std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
+    //std::random_device rd;
+    //std::mt19937 gen(rd()); // Standard mersenne_twister_engine seeded with rd()
     std::uniform_real_distribution<> dis(0.0, 1.0);
 
     std::vector<double> random_points(n - 1);
     for (size_t i = 0; i < n - 1; ++i) {
-        random_points[i] = dis(gen); // Generate n-1 random points
+        random_points[i] = dis(rng); // Generate n-1 random points
     }
     std::sort(random_points.begin(), random_points.end()); // Sort them
 
@@ -431,7 +431,7 @@ void DAGTask::distribute_randomly(double total_budget, std::map<int, double>& di
     if (remainder > 0) {
         // Create a shuffled list of indices to distribute remainder fairly
         std::vector<int> shuffled_indices = node_indices;
-        std::shuffle(shuffled_indices.begin(), shuffled_indices.end(), gen);
+        std::shuffle(shuffled_indices.begin(), shuffled_indices.end(), rng);
 
         for (long long i = 0; i < remainder; ++i) {
             // Assign +1 to the first 'remainder' tasks in the shuffled list
@@ -475,97 +475,142 @@ DAGTask DAGTask::create_augmented_graph_step1() const {
 
     int aug_idx_counter = 0;
 
-    // --- Pass 1: Create all nodes (original and fake) in the new graph ---
+    // Pass 1: Create all nodes
     for (size_t i = 0; i < this->nodes.size(); ++i) {
-        const SubTask& original_node = this->nodes[i];
+        const SubTask& original_node_ref = this->nodes[i];
 
-        // Add fake node first if needed (and not source)
-        if (this->fake_task_wcets.count(i)) { // Check if node 'i' has a fake predecessor
+        if (this->fake_task_wcets.count(i)) { // Node 'i' has a fake predecessor
             augmented_dag.nodes.emplace_back();
             SubTask& fake_node = augmented_dag.nodes.back();
             fake_node.id = aug_idx_counter;
-            // Use negative original_dot_id to distinguish fake nodes if needed
-            fake_node.original_dot_id = -(original_node.original_dot_id + 1); // Example convention
+            // Mark fake nodes with a distinct original_dot_id pattern, e.g., negative
+            // Ensure it's different from any valid original_dot_id.
+            // Adding 1 before negating avoids -0 if original_dot_id was 0.
+            fake_node.original_dot_id = -(original_node_ref.original_dot_id + 1000000); // Large offset to avoid collision
             fake_node.wcet = this->fake_task_wcets.at(i);
-            // Fake nodes don't have core IDs in this model
+            // is_vulnerable, is_attacker_controlled, deltas, C_alpha are false/0 for fake tasks
             orig_to_fake_idx[i] = aug_idx_counter;
             aug_idx_counter++;
         }
 
-        // Add original node
-        augmented_dag.nodes.push_back(original_node); // Copy original node data
-        augmented_dag.nodes.back().id = aug_idx_counter; // Assign new sequential ID
-        // Clear old simulation state and adjacency from the copy
-        augmented_dag.nodes.back().reset_simulation_state(); // Reset state for simulation
-        augmented_dag.nodes.back().predecessors.clear();
-        augmented_dag.nodes.back().successors.clear();
+        // Add original node (copying all its properties, including threat markings and params)
+        augmented_dag.nodes.push_back(original_node_ref);
+        SubTask& aug_original_node = augmented_dag.nodes.back();
+        aug_original_node.id = aug_idx_counter; // New sequential ID in augmented graph
+        // original_dot_id is already copied from original_node_ref
+        // Threat markings (is_vulnerable, etc.) and params (deltas, C_alpha) are copied.
+        aug_original_node.predecessors.clear(); // Will be rewired
+        aug_original_node.successors.clear();   // Will be rewired
+        // Simulation state will be reset later for all nodes in augmented_dag
+
         orig_to_aug_idx[i] = aug_idx_counter;
         aug_idx_counter++;
     }
 
-    // --- Pass 2: Wire up predecessors and successors ---
+    // Pass 2: Wire up predecessors and successors (logic mostly unchanged)
+    // ... (ensure this logic correctly uses orig_to_aug_idx and orig_to_fake_idx
+    //      to connect nodes within augmented_dag.nodes) ...
     for (size_t i = 0; i < this->nodes.size(); ++i) {
-        const SubTask& original_node = this->nodes[i];
-        int current_aug_orig_idx = orig_to_aug_idx.at(i);
+        const SubTask& original_node_ref = this->nodes[i];
+        int current_aug_orig_node_idx = orig_to_aug_idx.at(i);
 
-        if (orig_to_fake_idx.count(i)) {
-            // Node 'i' has a fake predecessor vf(i)
-            int current_aug_fake_idx = orig_to_fake_idx.at(i);
+        if (orig_to_fake_idx.count(i)) { // Node 'i' has a fake predecessor vf(i)
+            int current_aug_fake_node_idx = orig_to_fake_idx.at(i);
 
-            // 1. Link vf(i) -> v
-            augmented_dag.nodes[current_aug_fake_idx].successors.push_back(current_aug_orig_idx);
-            augmented_dag.nodes[current_aug_orig_idx].predecessors.push_back(current_aug_fake_idx);
+            // 1. Link vf(i) -> v (original node i in augmented graph)
+            augmented_dag.nodes[current_aug_fake_node_idx].successors.push_back(current_aug_orig_node_idx);
+            augmented_dag.nodes[current_aug_orig_node_idx].predecessors.push_back(current_aug_fake_node_idx);
 
             // 2. Link original predecessors u -> vf(i)
-            for (int orig_pred_idx : original_node.predecessors) {
-                if (orig_to_aug_idx.count(orig_pred_idx)) {
-                    int aug_pred_idx = orig_to_aug_idx.at(orig_pred_idx);
-                    augmented_dag.nodes[aug_pred_idx].successors.push_back(current_aug_fake_idx);
-                    augmented_dag.nodes[current_aug_fake_idx].predecessors.push_back(aug_pred_idx);
-                } else {
-                     throw std::runtime_error("Internal error: Original predecessor index not found in mapping during augmentation.");
-                }
+            for (int orig_pred_idx_of_i : original_node_ref.predecessors) {
+                int aug_idx_of_orig_pred_u = orig_to_aug_idx.at(orig_pred_idx_of_i);
+                augmented_dag.nodes[aug_idx_of_orig_pred_u].successors.push_back(current_aug_fake_node_idx);
+                augmented_dag.nodes[current_aug_fake_node_idx].predecessors.push_back(aug_idx_of_orig_pred_u);
             }
-        } else {
-            // Node 'i' is the source node (no fake predecessor)
-            // Link source -> original successors w
-            for (int orig_succ_idx : original_node.successors) {
-                 // Successor 'w' might have a fake node vf(w) or not
-                 int target_node_idx = -1;
-                 if (orig_to_fake_idx.count(orig_succ_idx)) {
-                     // Link source 'i' to fake node vf(w)
-                     target_node_idx = orig_to_fake_idx.at(orig_succ_idx);
-                 } else {
-                      // This case should not happen if successor is not source and has preds
-                      // If successor IS source (cycle?) or has no preds, link directly
-                      // However, Step 1 only adds fake tasks for nodes with preds.
-                      // Let's assume successors are non-source and have fake tasks.
-                      // If a successor truly has no predecessors (other than source),
-                      // it wouldn't have a fake task. Link directly to original.
-                      if (this->nodes[orig_succ_idx].predecessors.empty()) {
-                           target_node_idx = orig_to_aug_idx.at(orig_succ_idx);
-                      } else {
-                           // This implies orig_succ_idx should have had a fake task
-                           throw std::runtime_error("Internal error: Successor node missing expected fake task during augmentation.");
-                      }
-                 }
-
-                 if (target_node_idx != -1) {
-                     augmented_dag.nodes[current_aug_orig_idx].successors.push_back(target_node_idx);
-                     augmented_dag.nodes[target_node_idx].predecessors.push_back(current_aug_orig_idx);
-                 }
+        } else { // Node 'i' is an original source node
+            for (int orig_succ_idx_of_i : original_node_ref.successors) {
+                int aug_target_node_idx; // This will be the node that 'i' points to in augmented graph
+                if (orig_to_fake_idx.count(orig_succ_idx_of_i)) {
+                    // Successor 'orig_succ_idx_of_i' has a fake task, so 'i' points to that fake task
+                    aug_target_node_idx = orig_to_fake_idx.at(orig_succ_idx_of_i);
+                } else {
+                    // Successor 'orig_succ_idx_of_i' is itself a source (or has no preds), so 'i' points to it directly
+                    aug_target_node_idx = orig_to_aug_idx.at(orig_succ_idx_of_i);
+                }
+                augmented_dag.nodes[current_aug_orig_node_idx].successors.push_back(aug_target_node_idx);
+                augmented_dag.nodes[aug_target_node_idx].predecessors.push_back(current_aug_orig_node_idx);
             }
         }
     }
 
+
     // Reset simulation state for all nodes in the newly created graph
-    // (reset_simulation_state was called on original nodes, need to call on fake nodes too)
     for(auto& node : augmented_dag.nodes) {
-        node.reset_simulation_state(); // Ensures correct initial state (READY/NOT_READY)
+        node.reset_simulation_state();
     }
 
-
     return augmented_dag;
+}
+
+void DAGTask::clear_threat_markings() {
+    for (auto& node : nodes) {
+        node.reset_threat_params();
+    }
+}
+
+void assign_threat_parameters(SubTask& node) {
+    if (node.is_vulnerable) {
+        node.delta_minus = std::max(1.0, std::floor(0.10 * node.wcet));
+        node.delta_plus  = std::max(1.0, std::floor(0.10 * node.wcet));
+        node.c_alpha_requirement = std::max(1.0, std::floor(0.05 * node.wcet));
+        // For now, we don't differentiate C_alpha by attack type,
+        // so primary_vulnerable_attack_type is not strictly needed yet.
+    }
+}
+
+void DAGTask::mark_subtasks_randomly(int num_vulnerable, int num_attacker, std::mt19937& rng) {
+    clear_threat_markings();
+
+    if (nodes.empty()) return;
+    if (num_vulnerable < 0 || num_attacker < 0) {
+        throw std::invalid_argument("Number of vulnerable/attacker tasks cannot be negative.");
+    }
+
+    size_t total_original_nodes = nodes.size();
+    // Clamp to max possible
+    num_vulnerable = std::min(static_cast<int>(total_original_nodes), num_vulnerable);
+    num_attacker   = std::min(static_cast<int>(total_original_nodes), num_attacker);
+
+
+    std::vector<int> indices(total_original_nodes);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    // Mark vulnerable tasks
+    std::shuffle(indices.begin(), indices.end(), rng);
+    for (int i = 0; i < num_vulnerable; ++i) {
+        nodes[indices[i]].is_vulnerable = true;
+        assign_threat_parameters(nodes[indices[i]]); // Assign Δ and Cα
+    }
+
+    // Mark attacker-controlled tasks
+    std::shuffle(indices.begin(), indices.end(), rng); // Re-shuffle for independent selection
+    for (int i = 0; i < num_attacker; ++i) {
+        nodes[indices[i]].is_attacker_controlled = true;
+    }
+}
+void DAGTask::mark_subtasks_by_id(const std::set<int>& vulnerable_dot_ids,
+                                  const std::set<int>& attacker_dot_ids) {
+    clear_threat_markings();
+
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (vulnerable_dot_ids.count(nodes[i].original_dot_id)) {
+            nodes[i].is_vulnerable = true;
+            assign_threat_parameters(nodes[i]); // Assign Δ and Cα
+        }
+        if (attacker_dot_ids.count(nodes[i].original_dot_id)) {
+            nodes[i].is_attacker_controlled = true;
+        }
+    }
 }
 
 } // namespace DagParser

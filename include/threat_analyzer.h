@@ -6,6 +6,9 @@
 #include <set>
 #include <string>
 #include <random>
+#include <utility> // For std::pair
+
+namespace DagSim { class DagSimulator; } // Forward declaration
 
 namespace DagThreat { // New namespace for threat analysis
 
@@ -32,9 +35,17 @@ public:
         int vp,
         int ap,
         double tp,
+        DagParser::AttackType attack_type_to_evaluate, // <-- ADDED parameter
         int num_simulation_runs,
         //const ThreatParams& threat_params, // Pass threat definition parameters
         unsigned int seed = std::random_device{}()
+    );
+    static std::vector<std::pair<double, double>> calculate_vulnerable_window(
+        DagParser::AttackType attack_type,
+        double subtask_sim_start_time, // t_s(τ) from simulation
+        double subtask_sim_end_time,   // t_e(τ) from simulation
+        double delta_minus,            // Δ⁻(τ)
+        double delta_plus              // Δ⁺(τ)
     );
 
 private:
@@ -43,14 +54,16 @@ private:
     // It needs to know which subtask is vulnerable and the set of all attacker subtasks.
     // Returns the estimated probability (0.0 to 1.0).
     double estimate_threat_probability(
-        int vulnerable_task_idx,
-        int vulnerable_subtask_idx,
-        const std::set<std::pair<int, int>>& attacker_subtasks,
-        const DagParser::TaskSet& taskset,
-        int num_simulation_runs
-        //const ThreatParams& threat_params // Pass threat definition parameters
+        int vulnerable_task_idx,         // Will always be 0 for single DAG
+        int vulnerable_subtask_original_idx, // Index of τ_vul in original_dag.nodes
+        const DagParser::SubTask& vulnerable_subtask_ref, // Reference to the original vulnerable subtask
+        DagParser::AttackType attack_type_to_evaluate, // The specific attack type
+        const std::set<std::pair<int, int>>& attacker_subtask_identifiers, // Original {task_idx, subtask_idx}
+        DagParser::DAGTask& original_dag, // The single DAG (non-const to allow regen of fake params)
+        int num_cores,                    // Number of cores for simulation
+        int num_simulation_runs,
+        std::mt19937& rng                 // Pass RNG for fake param regeneration
     );
-
     // Epsilon threshold function (Definition 3.6)
     double epsilon_threshold(double value, double threshold_tp);
 
