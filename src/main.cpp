@@ -3,7 +3,7 @@
 #include "dag_task.h"
 #include "threat_analyzer.h"
 #include <iostream>
-#include <fstream> // For CSV output
+#include <fstream>
 #include <string>
 #include <vector>
 #include <stdexcept>
@@ -12,7 +12,7 @@
 #include <numeric>
 #include <cmath>
 #include <map>
-
+#include <omp.h> // For OpenMP
 
 // Helper to convert string to AttackType enum
 DagParser::AttackType stringToAttackType(const std::string& s) {
@@ -202,38 +202,55 @@ int main(int argc, char* argv[]) {
                 std::vector<double> th_augmenteds_for_combo;
 
                 // --- Loop for Macro Runs (repeated selections of vulnerable/attacker subtasks) ---
-                for (int macro_run = 0; macro_run < num_macro_runs; ++macro_run) {
-                    // std::cout << "\n--- Macro Run: " << macro_run + 1 << "/" << num_macro_runs << " ---" << std::endl; // Less verbose
+                // openmp paraallelize
+#pragma omp parallel
+                {
+                    DagParser::DAGTask thread_local_dag_copy; // Each thread gets its own copy
+                    DagParser::TaskSet thread_local_taskset;  // Each thread gets its own taskset wrapper
+                    std::mt19937 thread_local_rng(std::random_device{}() + omp_get_thread_num()); // Thread-safe RNG
 
-                    DagParser::DAGTask current_original_dag_copy = base_original_dag;
-                    current_original_dag_copy.mark_subtasks_randomly(current_vp_count, current_ap_count, global_rng);
+#pragma omp for
+                    for (int macro_run = 0; macro_run < num_macro_runs; ++macro_run) {
+                        // std::cout << "Thread " << omp_get_thread_num() << " starting macro_run " << macro_run << std::endl; // Debug
+                        thread_local_dag_copy = base_original_dag; // Create a fresh copy for this thread's iteration
+                        thread_local_dag_copy.mark_subtasks_randomly(current_vp_count, current_ap_count, thread_local_rng);
 
-                    DagParser::TaskSet temp_taskset_for_analysis;
-                    temp_taskset_for_analysis.tasks.push_back(current_original_dag_copy);
+                        thread_local_taskset.tasks.clear(); // Clear from previous iteration if any
+                        thread_local_taskset.tasks.push_back(thread_local_dag_copy);
 
-                    try {
-                        unsigned int th_calc_seed = global_rng();
-                        DagThreat::ThreatAnalysisResult results = analyzer.calculate_comparative_TH(
-                                temp_taskset_for_analysis,
-                                current_vp_count, // Pass the count
-                                current_ap_count, // Pass the count
-                                tp,
-                                current_attack_type,
-                                num_cores_cli,
-                                num_sim_runs_per_TH,
-                                th_calc_seed
-                                );
-                        th_originals_for_combo.push_back(results.th_original_dag);
-                        th_augmenteds_for_combo.push_back(results.th_augmented_dag);
-                    } catch (const std::exception& e) {
-                        std::cerr << "  Error in Macro Run " << macro_run + 1 << " for (vp=" << current_vp_count
-                            << ", ap=" << current_ap_count << ", Attack=" << attackTypeToString(current_attack_type)
-                            << "): " << e.what() << std::endl;
-                        th_originals_for_combo.push_back(-1.0);
-                        th_augmenteds_for_combo.push_back(-1.0);
-                    }
-                } // End Macro Runs Loop
-
+                        double res_orig = -1.0, res_aug = -1.0;
+                        try {
+                            unsigned int th_calc_seed = thread_local_rng();
+                            DagThreat::ThreatAnalysisResult results = analyzer.calculate_comparative_TH(
+                                    thread_local_taskset,
+                                    current_vp_count,
+                                    current_ap_count,
+                                    tp,
+                                    current_attack_type,
+                                    num_cores_cli,
+                                    num_sim_runs_per_TH,
+                                    th_calc_seed
+                                    );
+                            res_orig = results.th_original_dag;
+                            res_aug = results.th_augmented_dag;
+                        } catch (const std::exception& e) {
+                            // Critical section for cerr if multiple threads might write
+#pragma omp critical
+                            {
+                                std::cerr << "  Error in (Thread " << omp_get_thread_num()
+                                    << ", Macro Run " << macro_run + 1 << ") for (vp=" << current_vp_count
+                                    << ", ap=" << current_ap_count << ", Attack=" << attackTypeToString(current_attack_type)
+                                    << "): " << e.what() << std::endl;
+                            }
+                        }
+                        // Safely add results to shared vectors
+#pragma omp critical
+                        {
+                            th_originals_for_combo.push_back(res_orig);
+                            th_augmenteds_for_combo.push_back(res_aug);
+                        }
+                    } // End Macro Runs Loop (omp for)
+                } // End Parallel Region
                 // --- Aggregate and Print Results for the Current (vp, ap, AttackType) Combo ---
                 double avg_th_orig = 0.0; int count_orig = 0;
                 for (double val : th_originals_for_combo) if (val >= 0.0) { avg_th_orig += val; count_orig++; }

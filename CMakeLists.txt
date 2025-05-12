@@ -8,6 +8,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF) # Prefer standard C++
 
+# --- OPENMP
+find_package(OpenMP REQUIRED)
+if(OpenMP_FOUND)
+    message(STATUS "OpenMP found, enabling OpenMP support.")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+else()
+    message(WARNING "OpenMP not found. Building without OpenMP parallelization.")
+endif()
+
 # --- Library Definition ---
 # Collect source files for the library (excluding main)
 file(GLOB LIB_SOURCES
@@ -27,6 +38,10 @@ target_include_directories(dag_parser
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+if(OpenMP_FOUND) # Link library with OpenMP flags if found
+    target_link_libraries(dag_parser PUBLIC OpenMP::OpenMP_CXX)
+endif()
 
 # --- Executable Definition ---
 add_executable(dag_loader src/main.cpp)
