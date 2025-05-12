@@ -44,15 +44,23 @@ std::string attackTypeToString(DagParser::AttackType at) {
 
 int main(int argc, char* argv[]) {
     // --- Argument Handling ---
-    if (argc < 8) {
+     const int MIN_REQUIRED_ARGS = 8; // Program name + 7 required args
+
+    if (argc < MIN_REQUIRED_ARGS) {
         std::cerr << "Usage: " << argv[0]
-            << " <taskset_dir> <num_cores> <vp_count|-1> <ap_count|-1> <tp> <attack_type|ALL_RELEVANT> <num_macro_runs> [num_sim_runs_per_TH] [output_csv_file]"
-            << std::endl;
+                  << " <taskset_dir> <num_cores> <vp_count|-1> <ap_count|-1> <tp> <attack_type|ALL_RELEVANT> <num_macro_runs> [num_sim_runs_per_TH] [output_csv_file]"
+                  << std::endl;
         std::cerr << "  vp_count: number of vulnerable subtasks, or -1 to auto-sweep" << std::endl;
         std::cerr << "  ap_count: number of attacker subtasks, or -1 to auto-sweep" << std::endl;
-        // ... (rest of usage message) ...
+        std::cerr << "  tp: threat probability threshold (0.0-1.0)" << std::endl;
+        std::cerr << "  attack_type: ANTERIOR, POSTERIOR, PINCER_SINGLE, PINCER_DUAL, CONCURRENT, NONE, ALL_RELEVANT" << std::endl;
+        std::cerr << "  num_macro_runs: Number of times to repeat TH calculation with new random subtask selections" << std::endl;
+        std::cerr << "  num_sim_runs_per_TH (optional): N for probability estimation (default 1000)" << std::endl;
+        std::cerr << "  output_csv_file (optional): Path to CSV output file" << std::endl;
+        std::cerr << "Example: " << argv[0] << " ../dags/taskset_0 8 -1 -1 0.1 CONCURRENT 10 1000 results.csv" << std::endl;
         return 1;
     }
+
     std::string taskset_dir = argv[1];
     int num_cores_cli = 0;
     int vp_count_arg = 0;
