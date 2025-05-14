@@ -187,7 +187,9 @@ int main(int argc, char* argv[]) {
             << " up to " << total_subtasks_in_dag << " subtasks." << std::endl;
         for (int current_val = step; current_val <= total_subtasks_in_dag; current_val += step) {
             vp_counts_to_iterate.push_back(current_val);
-            ap_counts_to_iterate.push_back(current_val);
+            if(current_val<= total_subtasks_in_dag/2){
+                ap_counts_to_iterate.push_back(current_val);
+            }
         }
         if (vp_counts_to_iterate.empty() && total_subtasks_in_dag > 0) { // Ensure at least one iteration if step > total
             vp_counts_to_iterate.push_back(total_subtasks_in_dag);
