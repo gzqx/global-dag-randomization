@@ -1,5 +1,5 @@
 digraph Task {
-i [shape=box, label="D=200 T=200"]; 
+i [shape=box, label="D=386 T=395"]; 
 0 [label="79(0, p:0)"];
 1 [label="62(1, p:0)"];
 2 [label="73(2, p:0)"];
