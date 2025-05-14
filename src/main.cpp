@@ -62,7 +62,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::string taskset_dir = argv[1];
-    int num_cores_cli = 0;
+    int num_cores_arg = 0; // m from command line, can be -1
     int vp_count_arg = 0;
     int ap_count_arg = 0;
     double tp = 0.0;
@@ -72,10 +72,16 @@ int main(int argc, char* argv[]) {
     int num_macro_runs = 0;
     int num_sim_runs_per_TH = 1000;
     bool auto_sweep_vp_ap = false;
-    std::string output_csv_filepath; // Optional CSV output file
+    std::string output_csv_filepath;
+    bool auto_sweep_m = false;
 
     try {
-        num_cores_cli = std::stoi(argv[2]);
+        num_cores_arg = std::stoi(argv[2]); // Read m
+        if (num_cores_arg == -1) {
+            auto_sweep_m = true;
+        } else if (num_cores_arg <= 0) {
+            throw std::invalid_argument("num_cores must be positive or -1 for auto-sweep.");
+        }
         vp_count_arg = std::stoi(argv[3]);
         ap_count_arg = std::stoi(argv[4]);
         tp = std::stod(argv[5]);
@@ -98,8 +104,7 @@ int main(int argc, char* argv[]) {
 
         if (argc > 8) num_sim_runs_per_TH = std::stoi(argv[8]);
         if (argc > 9) output_csv_filepath = argv[9]; // Get CSV filepath
-
-        if (num_cores_cli <= 0 || tp < 0.0 || tp > 1.0 ||
+        if ((!auto_sweep_m && num_cores_arg <= 0) || tp < 0.0 || tp > 1.0 ||
                 num_macro_runs <= 0 || num_sim_runs_per_TH <= 0) {
             throw std::invalid_argument("Invalid numeric argument value for cores, tp, or run counts.");
         }
@@ -124,6 +129,7 @@ int main(int argc, char* argv[]) {
     DagThreat::ThreatAnalyzer analyzer;
     std::mt19937 global_rng(std::random_device{}()); // RNG for selecting vulnerable/attacker tasks
     const DagParser::DAGTask& base_original_dag = loaded_taskset.tasks[0];
+    DagParser::DAGTask base_original_dag_mutable_copy = loaded_taskset.tasks[0];
     int total_subtasks_in_dag = base_original_dag.nodes.size();
 
     if (total_subtasks_in_dag == 0) {
@@ -167,7 +173,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\n--- Starting Threat Analysis ---" << std::endl;
     std::cout << "Global Parameters: tp=" << tp
         << ", N_sim_per_TH=" << num_sim_runs_per_TH
-        << ", Cores (m)=" << num_cores_cli
+        << ", Cores (m)=" << num_cores_arg
         << ", Macro Runs per (vp,ap,AttackType) combo=" << num_macro_runs << std::endl;
 
 
@@ -193,108 +199,142 @@ int main(int argc, char* argv[]) {
     }
 
 
-    // --- Outermost Loops: vp_count, then ap_count ---
-    for (int current_vp_count : vp_counts_to_iterate) {
-        for (int current_ap_count : ap_counts_to_iterate) {
-            std::cout << "\n\n====================================================================" << std::endl;
-            std::cout << "Evaluating for vp_count = " << current_vp_count
-                << ", ap_count = " << current_ap_count << std::endl;
-            std::cout << "====================================================================" << std::endl;
+        // --- Determine m (cores) iteration range ---
+    std::vector<int> m_values_to_iterate;
+    if (auto_sweep_m) {
+        // Pre-calculate volume and CPL on the mutable copy
+        base_original_dag_mutable_copy.get_volume();
+        base_original_dag_mutable_copy.get_critical_path_length();
+        int m_min_graham = base_original_dag_mutable_copy.get_min_cores_graham_bound();
 
-            // --- Loop for each Attack Type ---
-            for (DagParser::AttackType current_attack_type : attack_types_to_run_list) {
-                std::cout << "\n<<<<<<<<<< Evaluating Attack Type: "
-                    << attackTypeToString(current_attack_type) << " >>>>>>>>>>" << std::endl;
+        if (m_min_graham == -1) {
+            std::cerr << "Error: DAG is unschedulable by Graham's bound even with infinite cores. Cannot auto-sweep m." << std::endl;
+            return 1;
+        }
+        if (m_min_graham == 0) m_min_graham = 1; // Should be at least 1
 
-                std::vector<double> th_originals_for_combo;
-                std::vector<double> th_augmenteds_for_combo;
+        int m_max_graham_sweep = 2 * m_min_graham;
+        std::cout << "Auto-sweeping num_cores (m) from " << m_min_graham << " to " << m_max_graham_sweep << std::endl;
+        for (int current_m_val = m_min_graham; current_m_val <= m_max_graham_sweep; ++current_m_val) {
+            if (current_m_val <= 0) continue; // Should not happen if m_min_graham >=1
+            m_values_to_iterate.push_back(current_m_val);
+        }
+        if (m_values_to_iterate.empty()){
+             std::cerr << "Error: No valid m values generated for auto-sweep. m_min_graham=" << m_min_graham << std::endl;
+             return 1;
+        }
+    } else {
+        m_values_to_iterate.push_back(num_cores_arg);
+    }
 
-                // --- Loop for Macro Runs (repeated selections of vulnerable/attacker subtasks) ---
-                // openmp paraallelize
+    for (int current_m_for_analysis : m_values_to_iterate) {
+        std::cout << "\n\n####################################################################" << std::endl;
+        std::cout << "Evaluating for Number of Cores (m) = " << current_m_for_analysis << std::endl;
+        std::cout << "####################################################################" << std::endl;
+
+        // --- Outermost Loops: vp_count, then ap_count ---
+        for (int current_vp_count : vp_counts_to_iterate) {
+            for (int current_ap_count : ap_counts_to_iterate) {
+                std::cout << "\n\n====================================================================" << std::endl;
+                std::cout << "Evaluating for vp_count = " << current_vp_count
+                    << ", ap_count = " << current_ap_count << std::endl;
+                std::cout << "====================================================================" << std::endl;
+
+                // --- Loop for each Attack Type ---
+                for (DagParser::AttackType current_attack_type : attack_types_to_run_list) {
+                    std::cout << "\n<<<<<<<<<< Evaluating Attack Type: "
+                        << attackTypeToString(current_attack_type) << " >>>>>>>>>>" << std::endl;
+
+                    std::vector<double> th_originals_for_combo;
+                    std::vector<double> th_augmenteds_for_combo;
+
+                    // --- Loop for Macro Runs (repeated selections of vulnerable/attacker subtasks) ---
+                    // openmp paraallelize
 #pragma omp parallel
-                {
-                    DagParser::DAGTask thread_local_dag_copy; // Each thread gets its own copy
-                    DagParser::TaskSet thread_local_taskset;  // Each thread gets its own taskset wrapper
-                    std::mt19937 thread_local_rng(std::random_device{}() + omp_get_thread_num()); // Thread-safe RNG
+                    {
+                        DagParser::DAGTask thread_local_dag_copy; // Each thread gets its own copy
+                        DagParser::TaskSet thread_local_taskset;  // Each thread gets its own taskset wrapper
+                        std::mt19937 thread_local_rng(std::random_device{}() + omp_get_thread_num()); // Thread-safe RNG
 
 #pragma omp for
-                    for (int macro_run = 0; macro_run < num_macro_runs; ++macro_run) {
-                        // std::cout << "Thread " << omp_get_thread_num() << " starting macro_run " << macro_run << std::endl; // Debug
-                        thread_local_dag_copy = base_original_dag; // Create a fresh copy for this thread's iteration
-                        thread_local_dag_copy.mark_subtasks_randomly(current_vp_count, current_ap_count, thread_local_rng);
+                        for (int macro_run = 0; macro_run < num_macro_runs; ++macro_run) {
+                            // std::cout << "Thread " << omp_get_thread_num() << " starting macro_run " << macro_run << std::endl; // Debug
+                            thread_local_dag_copy = base_original_dag; // Create a fresh copy for this thread's iteration
+                            thread_local_dag_copy.mark_subtasks_randomly(current_vp_count, current_ap_count, thread_local_rng);
 
-                        thread_local_taskset.tasks.clear(); // Clear from previous iteration if any
-                        thread_local_taskset.tasks.push_back(thread_local_dag_copy);
+                            thread_local_taskset.tasks.clear(); // Clear from previous iteration if any
+                            thread_local_taskset.tasks.push_back(thread_local_dag_copy);
 
-                        double res_orig = -1.0, res_aug = -1.0;
-                        try {
-                            unsigned int th_calc_seed = thread_local_rng();
-                            DagThreat::ThreatAnalysisResult results = analyzer.calculate_comparative_TH(
-                                    thread_local_taskset,
-                                    current_vp_count,
-                                    current_ap_count,
-                                    tp,
-                                    current_attack_type,
-                                    num_cores_cli,
-                                    num_sim_runs_per_TH,
-                                    th_calc_seed
-                                    );
-                            res_orig = results.th_original_dag;
-                            res_aug = results.th_augmented_dag;
-                        } catch (const std::exception& e) {
-                            // Critical section for cerr if multiple threads might write
+                            double res_orig = -1.0, res_aug = -1.0;
+                            try {
+                                unsigned int th_calc_seed = thread_local_rng();
+                                DagThreat::ThreatAnalysisResult results = analyzer.calculate_comparative_TH(
+                                        thread_local_taskset,
+                                        current_vp_count,
+                                        current_ap_count,
+                                        tp,
+                                        current_attack_type,
+                                        current_m_for_analysis,
+                                        num_sim_runs_per_TH,
+                                        th_calc_seed
+                                        );
+                                res_orig = results.th_original_dag;
+                                res_aug = results.th_augmented_dag;
+                            } catch (const std::exception& e) {
+                                // Critical section for cerr if multiple threads might write
+#pragma omp critical
+                                {
+                                    std::cerr << "  Error in (Thread " << omp_get_thread_num()
+                                        << ", Macro Run " << macro_run + 1 << ") for (vp=" << current_vp_count
+                                        << ", ap=" << current_ap_count << ", Attack=" << attackTypeToString(current_attack_type)
+                                        << "): " << e.what() << std::endl;
+                                }
+                            }
+                            // Safely add results to shared vectors
 #pragma omp critical
                             {
-                                std::cerr << "  Error in (Thread " << omp_get_thread_num()
-                                    << ", Macro Run " << macro_run + 1 << ") for (vp=" << current_vp_count
-                                    << ", ap=" << current_ap_count << ", Attack=" << attackTypeToString(current_attack_type)
-                                    << "): " << e.what() << std::endl;
+                                th_originals_for_combo.push_back(res_orig);
+                                th_augmenteds_for_combo.push_back(res_aug);
                             }
-                        }
-                        // Safely add results to shared vectors
-#pragma omp critical
-                        {
-                            th_originals_for_combo.push_back(res_orig);
-                            th_augmenteds_for_combo.push_back(res_aug);
-                        }
-                    } // End Macro Runs Loop (omp for)
-                } // End Parallel Region
-                // --- Aggregate and Print Results for the Current (vp, ap, AttackType) Combo ---
-                double avg_th_orig = 0.0; int count_orig = 0;
-                for (double val : th_originals_for_combo) if (val >= 0.0) { avg_th_orig += val; count_orig++; }
-                if (count_orig > 0) avg_th_orig /= count_orig; else avg_th_orig = -1.0; // Use -1 for no valid runs
+                        } // End Macro Runs Loop (omp for)
+                    } // End Parallel Region
+                      // --- Aggregate and Print Results for the Current (vp, ap, AttackType) Combo ---
+                    double avg_th_orig = 0.0; int count_orig = 0;
+                    for (double val : th_originals_for_combo) if (val >= 0.0) { avg_th_orig += val; count_orig++; }
+                    if (count_orig > 0) avg_th_orig /= count_orig; else avg_th_orig = -1.0; // Use -1 for no valid runs
 
-                double avg_th_aug = 0.0; int count_aug = 0;
-                for (double val : th_augmenteds_for_combo) if (val >= 0.0) { avg_th_aug += val; count_aug++; }
-                if (count_aug > 0) avg_th_aug /= count_aug; else avg_th_aug = -1.0; // Use -1 for no valid runs
-                std::cout << "\n--- Aggregated Results for (vp=" << current_vp_count
-                    << ", ap=" << current_ap_count << ", Attack=" << attackTypeToString(current_attack_type)
-                    << ") (Over " << num_macro_runs << " Macro Runs) ---" << std::endl;
+                    double avg_th_aug = 0.0; int count_aug = 0;
+                    for (double val : th_augmenteds_for_combo) if (val >= 0.0) { avg_th_aug += val; count_aug++; }
+                    if (count_aug > 0) avg_th_aug /= count_aug; else avg_th_aug = -1.0; // Use -1 for no valid runs
+                    std::cout << "\n--- Aggregated Results for (vp=" << current_vp_count
+                        << ", ap=" << current_ap_count << ", Attack=" << attackTypeToString(current_attack_type)
+                        << ") (Over " << num_macro_runs << " Macro Runs) ---" << std::endl;
 
-                if (count_orig > 0) std::cout << "Average TH for ORIGINAL DAG   : " << std::fixed << std::setprecision(6) << avg_th_orig << " (from " << count_orig << " runs)" << std::endl;
-                else std::cout << "No successful runs for ORIGINAL DAG TH." << std::endl;
-                if (count_aug > 0) std::cout << "Average TH for AUGMENTED DAG: " << std::fixed << std::setprecision(6) << avg_th_aug << " (from " << count_aug << " runs)" << std::endl;
-                else std::cout << "No successful runs for AUGMENTED DAG TH." << std::endl;    // --- Write to CSV File ---
-                
-                if (csv_file.is_open()) {
-                    csv_file << current_vp_count << ","
-                        << current_ap_count << ","
-                        << attackTypeToString(current_attack_type) << ","
-                        << num_macro_runs << ","
-                        << num_sim_runs_per_TH << ","
-                        << num_cores_cli << "," // Added Cores_M
-                        << tp << ","            // Added TP_Threshold
-                        << std::fixed << std::setprecision(8) // Use higher precision for CSV
-                        << (count_orig > 0 ? avg_th_orig : -1.0) << "," // Use -1.0 if no valid runs
-                        << count_orig << ","
-                        << (count_aug > 0 ? avg_th_aug : -1.0) << "," // Use -1.0 if no valid runs
-                        << count_aug
-                        << std::endl;
-                }
-                std::cout << "--------------------------------------------------------------------" << std::endl;
-            } // End Attack Types Loop
-        } // End ap_count Loop
-    } // End vp_count Loop
+                    if (count_orig > 0) std::cout << "Average TH for ORIGINAL DAG   : " << std::fixed << std::setprecision(6) << avg_th_orig << " (from " << count_orig << " runs)" << std::endl;
+                    else std::cout << "No successful runs for ORIGINAL DAG TH." << std::endl;
+                    if (count_aug > 0) std::cout << "Average TH for AUGMENTED DAG: " << std::fixed << std::setprecision(6) << avg_th_aug << " (from " << count_aug << " runs)" << std::endl;
+                    else std::cout << "No successful runs for AUGMENTED DAG TH." << std::endl;    // --- Write to CSV File ---
+
+                    if (csv_file.is_open()) {
+                        csv_file << current_vp_count << ","
+                            << current_ap_count << ","
+                            << attackTypeToString(current_attack_type) << ","
+                            << num_macro_runs << ","
+                            << num_sim_runs_per_TH << ","
+                            << current_m_for_analysis << "," // Added Cores_M
+                            << tp << ","            // Added TP_Threshold
+                            << std::fixed << std::setprecision(8) // Use higher precision for CSV
+                            << (count_orig > 0 ? avg_th_orig : -1.0) << "," // Use -1.0 if no valid runs
+                            << count_orig << ","
+                            << (count_aug > 0 ? avg_th_aug : -1.0) << "," // Use -1.0 if no valid runs
+                            << count_aug
+                            << std::endl;
+                    }
+                    std::cout << "--------------------------------------------------------------------" << std::endl;
+                } // End Attack Types Loop
+            } // End ap_count Loop
+        } // End vp_count Loop
+    } // End m Loop
     if (csv_file.is_open()) {
         csv_file.close();
         std::cout << "\nResults also written to: " << output_csv_filepath << std::endl;

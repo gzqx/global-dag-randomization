@@ -613,4 +613,40 @@ void DAGTask::mark_subtasks_by_id(const std::set<int>& vulnerable_dot_ids,
     }
 }
 
+// --- New Method: get_min_cores_graham_bound ---
+int DAGTask::get_min_cores_graham_bound() const {
+    // Ensure properties are calculated (const methods can call const getters)
+    // get_volume() and get_critical_path_length() will calculate if not cached.
+    // However, they are not const. We need to make them const or call them on a mutable copy.
+    // For simplicity, let's assume they are called on a non-const object before this,
+    // or we make them const and handle caching appropriately.
+    // Let's make them const and ensure caching works.
+
+    // To call non-const getters from a const method, we'd need to cast away constness
+    // or make the getters const and the members mutable for caching.
+    // A cleaner way for this specific function is to take copies of the values.
+    double L = const_cast<DAGTask*>(this)->get_critical_path_length(); // len(G)
+    double V = const_cast<DAGTask*>(this)->get_volume();             // vol(G)
+    double D = this->deadline;                                 // D_i
+
+    if (nodes.empty()) {
+        return 1; // An empty DAG is trivially schedulable on 1 core (or 0 if allowed)
+    }
+
+    if (L > D) {
+        return -1; // Unschedulable by this bound
+    }
+
+    if (V - L <= 1e-9) { // Use tolerance for floating point comparison
+        return 1;
+    }
+
+    double denominator = D - L;
+
+    double m_double = (V - L) / denominator;
+    int m_calculated = static_cast<int>(std::ceil(m_double));
+
+    return std::max(1, m_calculated); // m must be at least 1
+}
+
 } // namespace DagParser

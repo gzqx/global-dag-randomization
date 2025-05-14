@@ -71,6 +71,12 @@ public:
     // Clears all vulnerable/attacker markings and resets threat parameters on subtasks.
     void clear_threat_markings();
 
+    // Calculates the minimum number of cores 'm' required for this DAG
+    // to be schedulable by its deadline according to Graham's bound.
+    // Returns -1 if the DAG is unschedulable by this bound even with infinite cores
+    // (e.g., if len(G) > Deadline).
+    int get_min_cores_graham_bound() const;
+
     // Basic print for debugging
     void print() const {
         std::cout << "DAG Task (Source: " << source_file_path << ")\n"
