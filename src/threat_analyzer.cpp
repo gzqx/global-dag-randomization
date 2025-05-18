@@ -289,5 +289,13 @@ ThreatAnalysisResult ThreatAnalyzer::calculate_comparative_TH(
 
     return result;
 }
+    std::map<int, double> calculate_task_distribution_entropy(
+        DagParser::DAGTask& original_dag, // Non-const to allow fake param regeneration
+        const std::set<int>& subtask_indices_to_analyze,
+        int num_cores_m,
+        int num_entropy_runs,
+        unsigned int rng_seed = std::random_device{}()
+    );
+
 
 } // namespace DagThreat

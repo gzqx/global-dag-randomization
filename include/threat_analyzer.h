@@ -34,6 +34,14 @@ public:
         int num_simulation_runs_per_estimation,
         unsigned int seed = std::random_device{}()
     );
+    std::map<int, double> calculate_task_distribution_entropy(
+            DagParser::DAGTask& original_dag, // Non-const to allow fake param regeneration
+            const std::set<int>& subtask_indices_to_analyze,
+            int num_cores_m,
+            int num_entropy_runs,
+            unsigned int rng_seed = std::random_device{}()
+            );
+
 
 private:
     // Core estimation logic for a given DAG generation strategy (original or augmented)
