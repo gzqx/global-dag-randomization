@@ -43,6 +43,9 @@ std::string attackTypeToString(DagParser::AttackType at) {
 
 
 int main(int argc, char* argv[]) {
+    //disable cout to save IO overhead
+    static std::ofstream null_stream("/dev/null");
+    std::cout.rdbuf(null_stream.rdbuf());
     // --- Argument Handling ---
      const int MIN_REQUIRED_ARGS = 8; // Program name + 7 required args
 
