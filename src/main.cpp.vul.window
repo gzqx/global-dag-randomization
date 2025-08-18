@@ -15,10 +15,17 @@
 #include <set>
 #include <omp.h>
 
-// --- stringToAttackType and attackTypeToString helpers (keep as is) ---
-DagParser::AttackType stringToAttackType(const std::string& s) {
+// Helper to convert string to AttackType enum and detect special modes
+// Note: For this specific experiment, we don't need to parse attack type from args,
+// but we keep the function for completeness of the file.
+DagParser::AttackType stringToAttackType(const std::string& s,
+                                         bool& is_entropy_only_mode,
+                                         bool& is_targeted_entropy_mode) {
     std::string upper_s = s;
     for (char &c : upper_s) c = toupper(c);
+
+    is_entropy_only_mode = false;
+    is_targeted_entropy_mode = false;
 
     if (upper_s == "ANTERIOR") return DagParser::AttackType::ANTERIOR;
     if (upper_s == "POSTERIOR") return DagParser::AttackType::POSTERIOR;
@@ -26,8 +33,17 @@ DagParser::AttackType stringToAttackType(const std::string& s) {
     if (upper_s == "PINCER_DUAL") return DagParser::AttackType::PINCER_DUAL_WINDOW;
     if (upper_s == "CONCURRENT") return DagParser::AttackType::CONCURRENT;
     if (upper_s == "NONE") return DagParser::AttackType::NONE;
-    if (upper_s == "ALL_RELEVANT") return static_cast<DagParser::AttackType>(-1); // Special value for ALL
-    throw std::invalid_argument("Unknown AttackType string: " + s);
+    if (upper_s == "ALL_RELEVANT") return static_cast<DagParser::AttackType>(-1);
+    if (upper_s == "ENTROPY_ONLY") {
+        is_entropy_only_mode = true;
+        return DagParser::AttackType::NONE;
+    }
+    if (upper_s == "TARGETED_ENTROPY") {
+        is_targeted_entropy_mode = true;
+        is_entropy_only_mode = true;
+        return DagParser::AttackType::NONE;
+    }
+    throw std::invalid_argument("Unknown AttackType or Mode string: " + s);
 }
 
 std::string attackTypeToString(DagParser::AttackType at) {
@@ -42,15 +58,15 @@ std::string attackTypeToString(DagParser::AttackType at) {
     }
 }
 
+
 int main(int argc, char* argv[]) {
     // --- Argument Handling for this specific experiment ---
     if (argc < 6) {
-        std::cerr << "Usage for Combined Sweep Test: " << argv[0]
+        std::cerr << "Usage for Window Size Test: " << argv[0]
                   << " <taskset_dir> <num_cores|-1> <vp_count> <ap_count> <num_macro_runs> [num_sim_runs_per_TH] [output_csv_file]"
                   << std::endl;
-        std::cerr << "  This will sweep vulnerable window size (10-100% of WCET) AND" << std::endl;
-        std::cerr << "  attacker execution requirement (10-100% of vulnerable window size)." << std::endl;
-        std::cerr << "Example: " << argv[0] << " ../dags/taskset_0 8 5 2 100 1000 results_combined_sweep.csv" << std::endl;
+        std::cerr << "  This will sweep vulnerable window size from 10% to 100%." << std::endl;
+        std::cerr << "Example: " << argv[0] << " ../dags/taskset_0 8 5 2 100 1000 results_window_sweep.csv" << std::endl;
         return 1;
     }
     std::string taskset_dir = argv[1];
@@ -118,8 +134,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: Could not open CSV output file: " << output_csv_filepath << std::endl;
             output_csv_filepath.clear();
         } else {
-            // New CSV Header for this combined experiment
-            csv_file << "Vulnerable_Window_Pct,Attacker_Exec_Pct_Of_Window,Attack_Type,Cores_M,"
+            // New CSV Header for this experiment
+            csv_file << "Vulnerable_Window_Pct,Attack_Type,Cores_M,"
                      << "Avg_TH_Original,Successful_Runs_Orig,"
                      << "Avg_TH_Augmented,Successful_Runs_Aug" << std::endl;
             std::cout << "Logging results to CSV: " << output_csv_filepath << std::endl;
@@ -131,7 +147,8 @@ int main(int argc, char* argv[]) {
         DagParser::AttackType::ANTERIOR, DagParser::AttackType::POSTERIOR,
         DagParser::AttackType::PINCER_DUAL_WINDOW, DagParser::AttackType::CONCURRENT
     };
-    double tp_fixed = 0.05;
+    double attacker_exec_pct_fixed = 0.10; // Fixed at 10% as per instruction
+    double tp_fixed = 0.05; // Use a fixed threat probability threshold
 
     // --- Determine m (cores) iteration range ---
     std::vector<int> m_values_to_iterate;
@@ -150,97 +167,88 @@ int main(int argc, char* argv[]) {
     }
 
     // --- New Outermost Loop: Vulnerable Window Percentage ---
-    for (int win_pct = 10; win_pct <= 100; win_pct += 10) {
-        double current_vulnerable_window_pct = static_cast<double>(win_pct) / 100.0;
+    for (int pct = 10; pct <= 100; pct += 10) {
+        double current_vulnerable_window_pct = static_cast<double>(pct) / 100.0;
+        std::cout << "\n\n####################################################################" << std::endl;
+        std::cout << "Evaluating for Vulnerable Window Size = " << pct << "%" << std::endl;
+        std::cout << "####################################################################" << std::endl;
 
-        // --- New Inner Loop: Attacker Execution Percentage ---
-        for (int exec_pct = 10; exec_pct <= 100; exec_pct += 10) {
-            double current_attacker_exec_pct_of_window = static_cast<double>(exec_pct) / 100.0;
-            // Calculate the actual percentage relative to the subtask's WCET
-            double current_attacker_exec_pct_of_wcet = current_attacker_exec_pct_of_window * current_vulnerable_window_pct;
+        for (int current_m_for_analysis : m_values_to_iterate) {
+            for (DagParser::AttackType current_attack_type : attack_types_to_run_list) {
+                std::cout << "\n<<<<<<<<<< m = " << current_m_for_analysis
+                          << ", Attack Type: " << attackTypeToString(current_attack_type) << " >>>>>>>>>>" << std::endl;
 
-            std::cout << "\n\n####################################################################" << std::endl;
-            std::cout << "Evaluating for Window Pct = " << win_pct << "%, Attacker Exec Pct of Window = " << exec_pct << "%" << std::endl;
-            std::cout << "####################################################################" << std::endl;
+                std::vector<double> th_originals_for_combo;
+                std::vector<double> th_augmenteds_for_combo;
+                th_originals_for_combo.reserve(num_macro_runs);
+                th_augmenteds_for_combo.reserve(num_macro_runs);
 
-            for (int current_m_for_analysis : m_values_to_iterate) {
-                for (DagParser::AttackType current_attack_type : attack_types_to_run_list) {
-                    std::cout << "\n<<<<<<<<<< m = " << current_m_for_analysis
-                              << ", Attack Type: " << attackTypeToString(current_attack_type) << " >>>>>>>>>>" << std::endl;
+                // --- Loop for Macro Runs (Parallelized) ---
+                #pragma omp parallel
+                {
+                    DagParser::DAGTask thread_local_dag_copy;
+                    DagParser::TaskSet thread_local_taskset;
+                    std::mt19937 thread_local_rng(std::random_device{}() + omp_get_thread_num());
 
-                    std::vector<double> th_originals_for_combo;
-                    std::vector<double> th_augmenteds_for_combo;
-                    th_originals_for_combo.reserve(num_macro_runs);
-                    th_augmenteds_for_combo.reserve(num_macro_runs);
+                    #pragma omp for
+                    for (int macro_run = 0; macro_run < num_macro_runs; ++macro_run) {
+                        thread_local_dag_copy = base_original_dag_mutable_copy;
+                        thread_local_taskset.tasks.clear();
+                        thread_local_taskset.tasks.push_back(thread_local_dag_copy);
 
-                    // --- Loop for Macro Runs (Parallelized) ---
-                    #pragma omp parallel
-                    {
-                        DagParser::DAGTask thread_local_dag_copy;
-                        DagParser::TaskSet thread_local_taskset;
-                        std::mt19937 thread_local_rng(std::random_device{}() + omp_get_thread_num());
-
-                        #pragma omp for
-                        for (int macro_run = 0; macro_run < num_macro_runs; ++macro_run) {
-                            thread_local_dag_copy = base_original_dag_mutable_copy;
-                            thread_local_taskset.tasks.clear();
-                            thread_local_taskset.tasks.push_back(thread_local_dag_copy);
-
-                            double res_orig = -1.0, res_aug = -1.0;
-                            try {
-                                unsigned int th_calc_seed = thread_local_rng();
-                                DagThreat::ThreatAnalysisResult results = analyzer.calculate_comparative_TH(
-                                        thread_local_taskset,
-                                        vp_count_arg,
-                                        ap_count_arg,
-                                        tp_fixed,
-                                        current_attack_type,
-                                        current_m_for_analysis,
-                                        current_vulnerable_window_pct,
-                                        current_attacker_exec_pct_of_wcet, // Pass the calculated value
-                                        num_sim_runs_per_TH,
-                                        th_calc_seed
-                                        );
-                                res_orig = results.th_original_dag;
-                                res_aug = results.th_augmented_dag;
-                            } catch (const std::exception& e) {
-                                #pragma omp critical
-                                { std::cerr << "  Error in (Thread " << omp_get_thread_num() << ", Macro Run " << macro_run + 1 << "): " << e.what() << std::endl; }
-                            }
+                        double res_orig = -1.0, res_aug = -1.0;
+                        try {
+                            unsigned int th_calc_seed = thread_local_rng();
+                            DagThreat::ThreatAnalysisResult results = analyzer.calculate_comparative_TH(
+                                    thread_local_taskset,
+                                    vp_count_arg,
+                                    ap_count_arg,
+                                    tp_fixed,
+                                    current_attack_type,
+                                    current_m_for_analysis,
+                                    current_vulnerable_window_pct,
+                                    attacker_exec_pct_fixed,
+                                    num_sim_runs_per_TH,
+                                    th_calc_seed
+                                    );
+                            res_orig = results.th_original_dag;
+                            res_aug = results.th_augmented_dag;
+                        } catch (const std::exception& e) {
                             #pragma omp critical
-                            {
-                                th_originals_for_combo.push_back(res_orig);
-                                th_augmenteds_for_combo.push_back(res_aug);
-                            }
+                            { std::cerr << "  Error in (Thread " << omp_get_thread_num() << ", Macro Run " << macro_run + 1 << "): " << e.what() << std::endl; }
                         }
-                    } // End Parallel Region
-
-                    // --- Aggregate and Print/Save Results ---
-                    double avg_th_orig = 0.0; int count_orig = 0;
-                    for (double val : th_originals_for_combo) if (val >= 0.0) { avg_th_orig += val; count_orig++; }
-                    if (count_orig > 0) avg_th_orig /= count_orig; else avg_th_orig = -1.0;
-
-                    double avg_th_aug = 0.0; int count_aug = 0;
-                    for (double val : th_augmenteds_for_combo) if (val >= 0.0) { avg_th_aug += val; count_aug++; }
-                    if (count_aug > 0) avg_th_aug /= count_aug; else avg_th_aug = -1.0;
-
-                    std::cout << "  Aggregated Results: "
-                              << "TH_orig = " << std::fixed << std::setprecision(6) << avg_th_orig
-                              << ", TH_aug = " << avg_th_aug << std::endl;
-
-                    if (csv_file.is_open()) {
-                        csv_file << current_vulnerable_window_pct << ","
-                                 << current_attacker_exec_pct_of_window << "," // Log the pct of window
-                                 << attackTypeToString(current_attack_type) << ","
-                                 << current_m_for_analysis << ","
-                                 << std::fixed << std::setprecision(8)
-                                 << (count_orig > 0 ? avg_th_orig : -1.0) << "," << count_orig << ","
-                                 << (count_aug > 0 ? avg_th_aug : -1.0) << "," << count_aug
-                                 << std::endl;
+                        #pragma omp critical
+                        {
+                            th_originals_for_combo.push_back(res_orig);
+                            th_augmenteds_for_combo.push_back(res_aug);
+                        }
                     }
+                } // End Parallel Region
+
+                // --- Aggregate and Print/Save Results ---
+                double avg_th_orig = 0.0; int count_orig = 0;
+                for (double val : th_originals_for_combo) if (val >= 0.0) { avg_th_orig += val; count_orig++; }
+                if (count_orig > 0) avg_th_orig /= count_orig; else avg_th_orig = -1.0;
+
+                double avg_th_aug = 0.0; int count_aug = 0;
+                for (double val : th_augmenteds_for_combo) if (val >= 0.0) { avg_th_aug += val; count_aug++; }
+                if (count_aug > 0) avg_th_aug /= count_aug; else avg_th_aug = -1.0;
+
+                std::cout << "  Aggregated Results: "
+                          << "TH_orig = " << std::fixed << std::setprecision(6) << avg_th_orig
+                          << ", TH_aug = " << avg_th_aug << std::endl;
+
+                if (csv_file.is_open()) {
+                    csv_file << current_vulnerable_window_pct << ","
+                             << attackTypeToString(current_attack_type) << ","
+                             << current_m_for_analysis << ","
+                             << std::fixed << std::setprecision(8)
+                             << (count_orig > 0 ? avg_th_orig : -1.0) << "," << count_orig << ","
+                             << (count_aug > 0 ? avg_th_aug : -1.0) << "," << count_aug
+                             << std::endl;
                 }
             }
-        } // End Attacker Execution Percentage Loop
+        }
     } // End Vulnerable Window Percentage Loop
 
     if (csv_file.is_open()) {

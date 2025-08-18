@@ -25,12 +25,14 @@ public:
 
     // Calculates threat for both original and augmented DAGs.
     ThreatAnalysisResult calculate_comparative_TH(
-        const DagParser::TaskSet& taskset, // Assumed to contain one DAG
+        const DagParser::TaskSet& taskset,
         int vp,
         int ap,
         double tp,
         DagParser::AttackType attack_type_to_evaluate,
-        int num_cores, // The 'm' for the system
+        int num_cores,
+        double vulnerable_window_pct, // <-- NEW
+        double attacker_exec_pct,     // <-- NEW
         int num_simulation_runs_per_estimation,
         unsigned int seed = std::random_device{}()
     );

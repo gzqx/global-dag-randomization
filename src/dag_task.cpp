@@ -558,19 +558,23 @@ void DAGTask::clear_threat_markings() {
     }
 }
 
-void assign_threat_parameters(SubTask& node) {
+void DAGTask::assign_threat_parameters(SubTask& node, double vulnerable_window_pct, double attacker_exec_pct) {
     if (node.is_vulnerable) {
-        node.delta_minus = std::max(1.0, std::floor(0.10 * node.wcet));
-        node.delta_plus  = std::max(1.0, std::floor(0.10 * node.wcet));
-        node.c_alpha_requirement = std::max(1.0, std::floor(0.05 * node.wcet));
-        // For now, we don't differentiate C_alpha by attack type,
-        // so primary_vulnerable_attack_type is not strictly needed yet.
+        // Use passed percentages instead of hardcoded 0.10 and 0.05
+        node.delta_minus = std::max(1.0, std::ceil(vulnerable_window_pct * node.wcet));
+        node.delta_plus  = std::max(1.0, std::ceil(vulnerable_window_pct * node.wcet));
+        node.c_alpha_requirement = std::max(1.0, std::ceil(attacker_exec_pct * node.wcet));
     }
 }
 
-void DAGTask::mark_subtasks_randomly(int num_vulnerable, int num_attacker, std::mt19937& rng) {
+void DAGTask::mark_subtasks_randomly(
+    int num_vulnerable,
+    int num_attacker,
+    double vulnerable_window_pct, // <-- NEW
+    double attacker_exec_pct,     // <-- NEW
+    std::mt19937& rng)
+{
     clear_threat_markings();
-
     if (nodes.empty()) return;
     if (num_vulnerable < 0 || num_attacker < 0) {
         throw std::invalid_argument("Number of vulnerable/attacker tasks cannot be negative.");
@@ -581,31 +585,34 @@ void DAGTask::mark_subtasks_randomly(int num_vulnerable, int num_attacker, std::
     num_vulnerable = std::min(static_cast<int>(total_original_nodes), num_vulnerable);
     num_attacker   = std::min(static_cast<int>(total_original_nodes), num_attacker);
 
-
-    std::vector<int> indices(total_original_nodes);
+    std::vector<int> indices(nodes.size());
     std::iota(indices.begin(), indices.end(), 0);
 
     // Mark vulnerable tasks
     std::shuffle(indices.begin(), indices.end(), rng);
     for (int i = 0; i < num_vulnerable; ++i) {
         nodes[indices[i]].is_vulnerable = true;
-        assign_threat_parameters(nodes[indices[i]]); // Assign Δ and Cα
+        assign_threat_parameters(nodes[indices[i]], vulnerable_window_pct, attacker_exec_pct); // Pass percentages
     }
 
     // Mark attacker-controlled tasks
-    std::shuffle(indices.begin(), indices.end(), rng); // Re-shuffle for independent selection
+    std::shuffle(indices.begin(), indices.end(), rng);
     for (int i = 0; i < num_attacker; ++i) {
         nodes[indices[i]].is_attacker_controlled = true;
     }
 }
-void DAGTask::mark_subtasks_by_id(const std::set<int>& vulnerable_dot_ids,
-                                  const std::set<int>& attacker_dot_ids) {
-    clear_threat_markings();
 
+void DAGTask::mark_subtasks_by_id(
+    const std::set<int>& vulnerable_dot_ids,
+    const std::set<int>& attacker_dot_ids,
+    double vulnerable_window_pct, // <-- NEW
+    double attacker_exec_pct      // <-- NEW
+) {
+    clear_threat_markings();
     for (size_t i = 0; i < nodes.size(); ++i) {
         if (vulnerable_dot_ids.count(nodes[i].original_dot_id)) {
             nodes[i].is_vulnerable = true;
-            assign_threat_parameters(nodes[i]); // Assign Δ and Cα
+            assign_threat_parameters(nodes[i], vulnerable_window_pct, attacker_exec_pct); // Pass percentages
         }
         if (attacker_dot_ids.count(nodes[i].original_dot_id)) {
             nodes[i].is_attacker_controlled = true;
@@ -613,18 +620,7 @@ void DAGTask::mark_subtasks_by_id(const std::set<int>& vulnerable_dot_ids,
     }
 }
 
-// --- New Method: get_min_cores_graham_bound ---
 int DAGTask::get_min_cores_graham_bound() const {
-    // Ensure properties are calculated (const methods can call const getters)
-    // get_volume() and get_critical_path_length() will calculate if not cached.
-    // However, they are not const. We need to make them const or call them on a mutable copy.
-    // For simplicity, let's assume they are called on a non-const object before this,
-    // or we make them const and handle caching appropriately.
-    // Let's make them const and ensure caching works.
-
-    // To call non-const getters from a const method, we'd need to cast away constness
-    // or make the getters const and the members mutable for caching.
-    // A cleaner way for this specific function is to take copies of the values.
     double L = const_cast<DAGTask*>(this)->get_critical_path_length(); // len(G)
     double V = const_cast<DAGTask*>(this)->get_volume();             // vol(G)
     double D = this->deadline;                                 // D_i

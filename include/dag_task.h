@@ -54,19 +54,31 @@ public:
     // Throws std::runtime_error if fake params not generated.
     DAGTask create_augmented_graph_step1() const;
 
-    // --- New Methods for Marking Vulnerable/Attacker Subtasks ---
+    // --- Marking Vulnerable/Attacker Subtasks ---
     // Marks a fraction of original subtasks randomly.
     // num_vulnerable: how many original subtasks to mark as vulnerable.
     // num_attacker: how many original subtasks to mark as attacker-controlled.
     // rng: random number generator.
     // Note: A subtask can be both vulnerable and attacker-controlled if selected by both.
-    void mark_subtasks_randomly(int num_vulnerable, int num_attacker, std::mt19937& rng);
+    void mark_subtasks_randomly(
+        int num_vulnerable,
+        int num_attacker,
+        double vulnerable_window_pct, 
+        double attacker_exec_pct,     
+        std::mt19937& rng
+    );
 
     // Marks subtasks based on their original DOT IDs.
     // vulnerable_dot_ids: Set of original DOT IDs to mark as vulnerable.
     // attacker_dot_ids: Set of original DOT IDs to mark as attacker-controlled.
-    void mark_subtasks_by_id(const std::set<int>& vulnerable_dot_ids,
-                             const std::set<int>& attacker_dot_ids);
+    void mark_subtasks_by_id(
+        const std::set<int>& vulnerable_dot_ids,
+        const std::set<int>& attacker_dot_ids,
+        double vulnerable_window_pct, 
+        double attacker_exec_pct      
+    );
+
+
 
     // Clears all vulnerable/attacker markings and resets threat parameters on subtasks.
     void clear_threat_markings();
@@ -120,6 +132,7 @@ private:
     double calculate_original_wcet_on_path(const std::vector<int>& path_nodes);
     // Placeholder for random distribution
     void distribute_randomly(double total_budget, std::map<int, double>& distribution_map, std::mt19937& rng);
+    void assign_threat_parameters(SubTask& node, double vulnerable_window_pct, double attacker_exec_pct);
 };
 
 } // namespace DagParser

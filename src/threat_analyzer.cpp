@@ -211,12 +211,13 @@ double ThreatAnalyzer::_estimate_threat_for_dag_config(
 }
 
 
-// --- Public Method: calculate_comparative_TH ---
 ThreatAnalysisResult ThreatAnalyzer::calculate_comparative_TH(
     const DagParser::TaskSet& taskset,
     int vp, int ap, double tp,
     DagParser::AttackType attack_type_to_evaluate,
-    int num_cores, // This is 'm'
+    int num_cores,
+    double vulnerable_window_pct, // <-- NEW
+    double attacker_exec_pct,     // <-- NEW
     int num_simulation_runs_per_estimation,
     unsigned int seed)
 {
@@ -229,8 +230,7 @@ ThreatAnalysisResult ThreatAnalyzer::calculate_comparative_TH(
     std::mt19937 rng(seed);
     DagSim::DagSimulator simulator; // Create one simulator for all runs
 
-    // Mark vulnerable and attacker subtasks ONCE on the original_dag_copy
-    original_dag_copy.mark_subtasks_randomly(vp, ap, rng);
+    original_dag_copy.mark_subtasks_randomly(vp, ap, vulnerable_window_pct, attacker_exec_pct, rng);
 
     std::set<std::pair<int, int>> all_vulnerable_subtasks_in_dag;
     for(size_t i=0; i < original_dag_copy.nodes.size(); ++i) {
