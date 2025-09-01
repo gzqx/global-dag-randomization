@@ -1,5 +1,6 @@
 #dags/
 builds/
+build/
 .cache/
 *.sh
 result*
